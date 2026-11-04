@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "percepta"
+version = "0.1.0"
+description = "percepta — a pluggable observation layer for robot agents"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "percepta authors" }]
+keywords = ["robotics", "perception", "segmentation", "agent"]
+classifiers = [
+  "Programming Language :: Python :: 3.10",
+  "License :: OSI Approved :: Apache Software License",
+]
+dependencies = [
+  "pydantic>=2",
+  "numpy",
+  "pillow",
+  "pyyaml",
+]
+
+[project.optional-dependencies]
+service = ["fastapi>=0.110", "uvicorn>=0.27"]
+sam3 = ["torch>=2.1", "sam3"]
+dev = ["pytest>=7", "httpx>=0.25", "ruff>=0.4"]
+
+[project.scripts]
+percepta = "percepta.cli:main"
+
+[project.entry-points."percepta.tools"]
+fake = "percepta.tools.fake:FakeTool"
+sam3 = "percepta.tools.sam3:Sam3Tool"
+multi_view_3d = "percepta.tools.multi_view_3d:MultiView3DTool"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/percepta"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "gpu: requires a GPU and/or model weights; skipped by default",
+]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]

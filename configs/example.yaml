@@ -1,0 +1,30 @@
+# Example production config (spec §11.1). Requires the `sam3` extra and gated weights,
+# which are never vendored in this repository: point `checkpoint` at your local file.
+server:
+  host: 127.0.0.1
+  port: 8790
+  max_body_bytes: 33554432
+  max_queue: 8
+  request_timeout_ms: 120000
+  token_env: PERCEPTA_TOKEN
+device:
+  cuda_visible_devices: "0"
+pipeline:
+  default: ["sam3", "multi_view_3d"]
+tools:
+  sam3:
+    enabled: true
+    checkpoint: /models/sam3.pt
+    resolution: 1008
+    min_score: 0.2
+  fake:
+    enabled: false
+cache:
+  enabled: true
+  max_entries: 256
+  ttl_s: 300
+logging:
+  level: info
+  json: true
+metrics:
+  enabled: false

@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Virtualenvs / tooling caches
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Model weights must never be committed (spec §12)
+*.pt
+*.pth
+*.safetensors
+*.ckpt
+models/
+weights/
+
+# Local artifacts
+*.log
+.DS_Store
+/tmp/
