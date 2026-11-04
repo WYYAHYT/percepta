@@ -110,3 +110,96 @@ treating two missed detections as a match.
 
 *Decision:* add `src/percepta/pipeline.py` with `PipelineRunner` (see `AGENTS.md` §4) and
 have both callers use it, rather than duplicating orchestration.
+
+## D13 — `VerificationResult.status` precedence
+
+*Conflict:* §10 defines `status: Status` but never says what it means for the comparison.
+
+*Decision:* `ok` when every required check passed; otherwise `not_found` if either percept
+is `not_found`; otherwise `invalid_request` when `action`/`options` are malformed; otherwise
+propagate `after.status` (`occluded`/`unavailable`/`timeout`/`invalid_request`). When
+`after.status == "ok"` and only a substantive check failed (say the object rose 4 cm instead
+of 10), `status` stays `"ok"` and the verdict lives in `ok`/`checks` — the percept was fine,
+the action was not. `details` carries numeric markers (`geometry_available`,
+`masks_available`, `frame_mismatch`, `ee_delta_available`, …) instead of prose, because the
+frozen `VerificationResult` has no `message` field.
+
+## D14 — `stable` needs a third observation
+
+*Decision:* `checks["stable"]` is only computed when `options["stable_with"]` is supplied (a
+`Percept`, `Observation`, `Mask`, or bool ndarray). `required` defaults to "every applicable
+check" and may be narrowed, but narrowing can never make `not_found` pass. Asking for
+`required=["stable"]` without `stable_with` is a malformed request: `ok=False`,
+`checks["stable"]=False`, `status="invalid_request"`.
+
+## D15 — A geometry stage supplies `fused`; it is never duplicated
+
+*Conflict:* §5.3 puts `multi_view_3d` in the default pipeline, while §9 describes fusion as
+a step of the response. Doing both computes geometry twice and emits a camera-less,
+observation-less Percept inside `percepts`.
+
+*Decision:* if a pipeline tool reports `capabilities().kind == "geometry"`, its single ok
+Percept becomes `response.fused` and is **excluded from `percepts`**. `fusion.fuse()` is only
+called when `options.fuse` is true *and* no geometry-kind stage ran (e.g.
+`options.tools=["fake"]`). A geometry stage that yields nothing gives `fused=None` +
+`geometry_unavailable`, not a second fusion attempt. A geometry Percept with status
+`unavailable`/`invalid_request` stays visible in `percepts`, because that is a real failure
+the caller must see (§16.4).
+
+## D16 — Prism cross-section is the multi-view visual hull at mid-height
+
+*Conflict:* §9.2/D4 fix the *height search* but not how the cross-section (hence the centroid,
+bbox and yaw) is taken.
+
+*Decision:* the height comes from D4 verbatim (smallest `h` reaching the IoU threshold, else
+arg-max + `geometry_low_confidence`). The reported footprint is the **intersection of all
+views' cone slices at mid-height**, not one source view's slice: a single view's slice is a
+"shadow" that biased the centre by 5–12 cm at 90–140° view separation, versus 0.2–1.5 cm
+when intersected. Consequences, documented in `fusion.py`: the prism `bbox3d` is a
+visual-hull **upper bound** (no depth ⇒ no surface to fit), the height search exits at the
+first passing height (~25× faster, same answer), `table_plane` is honoured by its height at
+the object and extrusion is along world `+z` (a tilted plane triggers
+`table_plane_tilted`), and single-view geometry assumes `single_view_rough_height_m`
+(default 0.10 m) with `uncertainty_m >= 0.03`.
+
+## D17 — An unavailable tool stays HTTP 200 (explicit deviation from appendix A)
+
+*Conflict:* appendix A lists `tool_unavailable` with HTTP `503`, but annotates it
+"(Percept.status=`unavailable`)" — a 503 body cannot be a `PerceiveResponse`, and in a
+multi-tool pipeline one dead tool must not discard what the others produced.
+
+*Decision:* `POST /v1/perceive` answers **200** with the affected Percepts carrying
+`status="unavailable"` plus a `tool_unavailable` warning; `/healthz` reports the tool as
+`error`. This is a deliberate, recorded deviation from appendix A's HTTP column and is
+flagged for user review — the alternative (503 carrying a `PerceiveResponse`) is a one-line
+change in `service/routes.py` if preferred.
+
+## D18 — `capabilities().prompts == ∅` means "prompt-agnostic"
+
+*Decision:* a tool that declares an empty prompt set ignores `prompts` entirely (that is how
+`multi_view_3d` consumes `ctx.extras["upstream"]`). It must not be reported as
+`unsupported_prompt` for every camera×prompt. Tools that declare a non-empty set still reject
+anything outside it (S8).
+
+## D19 — Disabled tools are absent from health/introspection
+
+*Decision:* `config.tools.<name>.enabled: false` removes the tool from `/healthz`,
+`/v1/tools` and `/v1/info`; absence is the honest representation of "not part of this
+deployment". The frozen vocabulary `ok|loading|error` is preserved, and `lazy` (imported,
+loads on demand) still maps to `ok`. Listing a disabled tool as `ok` would tell operators
+SAM3 is available when it was never attempted.
+
+## D20 — Cache key covers only result-affecting options; first stage only
+
+*Decision:* the key is `v1:` + `sha256` over the sorted per-camera image hashes, the prompt's
+pydantic JSON, the tool name, and — appended only when supplied — `masks`, `min_score`,
+`top_k`. `tools`, `fuse`, `timeout_ms`, `cache` and `context` are excluded (§19.6). Caching
+applies only to the first pipeline stage: later stages depend on upstream Percepts, which the
+key cannot represent.
+
+## D21 — Unknown tool name is a 400; an unloadable one is a 200 Percept
+
+*Decision:* a name the registry does not know is a caller error (`invalid_request`, HTTP 400,
+same class as the §4.6 size mismatch). A tool that is configured but fails to load, or loads
+and then cannot serve, produces `status="unavailable"` Percepts inside HTTP 200 + a
+`tool_unavailable` warning. Neither case may ever be reported as `not_found`.

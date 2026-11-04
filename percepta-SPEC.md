@@ -559,6 +559,7 @@ percepta/
 |---|---|---|
 | v0.1 | 2026-11-04 | 首版：schema、坐标、工具协议、HTTP、几何、验证、里程碑 |
 | v0.1.1 | 2026-11-04 | 新增 §19.1 实现取向（D1–D12）：`unsupported_prompt` 映射、`ToolContext.extras`、棱柱高度搜索离散化、单次工具调用、`pipeline.py` 等 |
+| v0.1.2 | 2026-11-04 | 补充 D13–D21：验证结果状态优先级、geometry 工具与 `fused` 去重、visual-hull 横截面、`tool_unavailable` 的 HTTP 200 取向（偏离附录 A，待复核）、prompt 无关工具、健康检查隐藏未启用工具、缓存 key 的 options 子集 |
 
 ---
 
@@ -590,6 +591,15 @@ percepta/
 | D10 | RLE 是否用 COCO 压缩字符串 | 附录 B 的交替 run-length 整数列表，不压缩；`sum(counts)==H*W` 由 `Mask` 校验；首像素为 1 时首段为 0 |
 | D11 | 两个空 mask 的 IoU | 定义为 `0.0`（`0/0` 无意义），避免 `verification.stable` 把两次漏检当成一致 |
 | D12 | §13 布局无编排模块，但 HTTP 与 `perceive_local()` 需同一语义 | 新增 `src/percepta/pipeline.py`（`PipelineRunner`），两处共用，避免编排逻辑重复 |
+| D13 | §10 未定义 `VerificationResult.status` 的回退优先级 | `ok` → `not_found`（任一侧）→ `invalid_request`（action/options 畸形）→ 透传 `after.status`；实质性检查失败但 `after.status="ok"` 时 `status` 保持 `ok`，结论落在 `ok`/`checks` |
+| D14 | §10 的 `stable` 在缺第三份观测时如何判定 | 仅在 `options["stable_with"]` 给出时计算；`required` 默认取"所有可评估项"，支持收窄；`required` 收窄也不能让 `not_found` 通过；`required=["stable"]` 但无 `stable_with` → `ok=False` + `invalid_request` |
+| D15 | §5.3 的 geometry 工具与 §9 的 `fuse` 会重复计算几何 | geometry 类工具的 ok Percept 直接作为 `fused`，**不进入** `percepts`；仅当 pipeline 中无 geometry 类工具时才调用 `fusion.fuse`；该工具返回空 → `fused=null` + `geometry_unavailable` |
+| D16 | §9 算法 2 的横截面取法未定义 | 高度按 D4 决定；质心/包围盒/朝向改用"各视角在**中高**处的锥截面之交"（visual hull），以抵消单视角"阴影"偏差；`bbox3d` 是**上界**而非紧贴框；仰角扫描在首次达标处提前结束 |
+| D17 | 附录 A 的 `tool_unavailable → 503` 与"Percept 承载状态"冲突 | **保留 HTTP 200**，Percept 取 `status="unavailable"` + `tool_unavailable` 警告；`/healthz` 报 `error`。理由：503 的响应体无法是 `PerceiveResponse`，且多工具 pipeline 中单工具不可用不应吞掉其它工具的结果。**此项为对附录 A HTTP 列的显式偏离，留待复核** |
+| D18 | `capabilities().prompts == ∅` 的语义 | 视为"**prompt 无关**"（geometry 类工具消费上游 Percept，忽略 prompts），不产生 `unsupported_prompt`；声明了非空集合的工具仍拒绝其余类型（S8 覆盖） |
+| D19 | §11.3 的 `ok|loading|error` 词汇表没有"未启用" | `config.tools.<name>.enabled: false` 的工具**不出现在** `/healthz`、`/v1/tools`、`/v1/info` 中（缺席即"不属于本次部署"），绝不伪装成 `ok`；`lazy`（导入成功、按需加载）仍映射为 `ok` |
+| D20 | §11.4 缓存 key 的"options 相关子集"具体指什么 | 仅纳入**影响结果**的 `masks`/`min_score`/`top_k`；`tools`/`fuse`/`timeout_ms`/`cache` 与 `context` 不纳入；缓存只作用于**首个无上游**的阶段（后续阶段依赖上游 Percept，key 无法覆盖） |
+| D21 | 未知工具名 vs 已配置但加载失败 | 未知工具名 = 调用方错误 → HTTP 400 `invalid_request`；已配置却加载失败/加载后不可用 → HTTP 200 + Percept `status="unavailable"`（见 D17），永不降级为 `not_found` |
 
 ---
 

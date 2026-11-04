@@ -63,8 +63,8 @@ class _Sam3Backend:
 
     def __init__(self, checkpoint: str | Path, device: str, resolution: int) -> None:
         try:
-            import torch  # noqa: PLC0415 - deliberately lazy (spec §16.2)
             import sam3  # noqa: PLC0415
+            import torch  # noqa: PLC0415 - deliberately lazy (spec §16.2)
         except Exception as exc:  # noqa: BLE001 - any import failure means "unavailable"
             raise ToolUnavailable(
                 "sam3 is not importable; install the 'sam3' extra and provide a checkpoint "
@@ -265,12 +265,14 @@ class Sam3Tool(BaseTool):
         try:
             masks, boxes, scores = self._backend.segment(prompt)
         except Sam3BackendError as exc:
+            model, model_sha = self._model_meta()
             provenance = self._provenance(
                 ctx,
                 started_at,
                 camera=camera,
                 prompt=prompt,
-                **dict(zip(("model", "model_sha256"), self._model_meta())),
+                model=model,
+                model_sha256=model_sha,
             )
             return make_percept(
                 percept_id=percept_id,

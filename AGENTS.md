@@ -67,7 +67,8 @@ class PerceptCache:
     @property
     def stats(self) -> dict[str, float]: ...
     @staticmethod
-    def make_key(image_sha256: dict[str, str], prompt: Prompt, tool: str) -> str: ...
+    def make_key(image_sha256: dict[str, str], prompt: Prompt, tool: str,
+                 options: PerceiveOptions | None = None) -> str: ...
 def build_cache(config: CacheConfig) -> PerceptCache: ...   # NullCache when disabled
 
 # src/percepta/verification.py        (owner: state)
@@ -103,3 +104,7 @@ tools (`list[Percept]`), per spec §5.3.
 3. New behaviour has a test that would fail without it.
 4. Coordinates: docstring states input/output frames and the formula.
 5. No new default dependency; no `import torch` at module import time.
+
+The Lead additionally runs `python3 scripts/e2e_smoke.py`, which starts a real uvicorn server
+on an ephemeral port, drives it through `PerceptaClient`, and asserts the in-process and HTTP
+paths agree pixel-for-pixel (Lead-owned; not part of pytest).

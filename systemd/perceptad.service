@@ -1,0 +1,76 @@
+# percepta observation service — loopback-only systemd unit (spec §12, milestone M5).
+#
+# The service binds 127.0.0.1 (spec §6 default; never expose 0.0.0.0 by default). To use
+# it from another machine, forward the port over SSH from the client host:
+#
+#     ssh -N -L 8790:127.0.0.1:8790 user@percepta-host
+#
+# and keep the tunnel alive with an equivalent client-side unit, e.g.
+#
+#     [Unit]
+#     Description=SSH tunnel to percepta
+#     [Service]
+#     ExecStart=/usr/bin/ssh -NT -o ExitOnForwardFailure=yes -L 8790:127.0.0.1:8790 user@percepta-host
+#     Restart=always
+#     RestartSec=10
+#
+# Optional bearer token: put `PERCEPTA_TOKEN=...` in /etc/percepta/percepta.env (mode
+# 0600). The unit reads it via EnvironmentFile; with the variable unset the service
+# disables authentication (spec §6).
+
+[Unit]
+Description=percepta observation service (loopback only)
+Documentation=file:///opt/percepta/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Dedicated unprivileged account; the service never needs root.
+User=percepta
+Group=percepta
+WorkingDirectory=/opt/percepta
+UMask=0027
+
+# Token (optional) and other environment, e.g. CUDA_VISIBLE_DEVICES=0. The leading "-"
+# makes a missing file non-fatal.
+EnvironmentFile=-/etc/percepta/percepta.env
+Environment=PYTHONUNBUFFERED=1
+# ProtectSystem=strict makes /opt read-only; never try to write .pyc files there.
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+# Bind address/port live in the config (server.host: 127.0.0.1, server.port: 8790).
+ExecStart=/opt/percepta/.venv/bin/percepta serve --config /etc/percepta/config.yaml
+
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=120
+TimeoutStopSec=20
+KillSignal=SIGINT
+LimitNOFILE=65536
+
+# Hardening. NoNewPrivileges is the important one: the process can never gain privileges.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+# Optional log directory; the "-" prefix keeps the unit valid when it does not exist
+# (logs normally go to the journal).
+ReadWritePaths=-/var/log/percepta
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Deliberately NOT set: PrivateDevices=yes would hide /dev/nvidia* and break CUDA;
+# MemoryDenyWriteExecute=yes breaks CUDA/torch JIT. Leave both at their defaults.
+
+[Install]
+WantedBy=multi-user.target

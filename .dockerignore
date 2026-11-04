@@ -1,0 +1,31 @@
+# Docker build context trimmer (must live at the context root to take effect).
+# Note: docker/.dockerignore is inert when building with the repo root as context,
+# which is what `docker build -f docker/Dockerfile .` does.
+
+.git
+.gitignore
+.venv
+venv
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+docs/
+tests/
+examples/
+
+# Never ship weights in an image (spec §12)
+*.pt
+*.pth
+*.safetensors
+*.ckpt
+models/
+weights/
+percepta-SPEC.md
+AGENTS.md
