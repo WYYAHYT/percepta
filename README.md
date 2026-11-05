@@ -120,13 +120,71 @@ tools:
 | `fake` | fake | — | colour threshold + connected components; makes CI meaningful |
 | `sam3` | segmenter | GPU + gated weights | text/box prompted open-vocabulary masks |
 | `multi_view_3d` | geometry | calibration (optional depth) | multi-view fusion → 3D centroid/bbox/yaw |
-
 A tool declares `capabilities()`; the pipeline validates prompts against those *before*
 calling, so a box-only tool handed a text prompt yields a Percept with
 `status="invalid_request"`, `message="unsupported_prompt"` — never a request-level failure.
 
 Adding a tool: subclass `percepta.tools.base.BaseTool`, keep heavy imports inside `load()`,
 register an entry point in the `percepta.tools` group (or `percepta.tools.<name>` module).
+
+## Model isolation (dependency conflicts)
+
+Sooner or later two models demand incompatible dependencies — say `sam3` needs `torch>=2.7`
+and a depth model is stuck on `torch==2.6`. One Python process can only hold **one** torch,
+so the conflict cannot be configured away; the models must run in separate interpreters.
+
+`percepta` solves this **without containers**, by making "where the model runs" a
+configuration choice rather than code:
+
+```yaml
+tools:
+  sam3:
+    backend: subprocess              # inprocess | subprocess | http
+    python: .venvs/sam3/bin/python   # this model's own virtualenv
+    cuda_visible_devices: "0"
+  depth:
+    backend: subprocess
+    python: .venvs/depth/bin/python  # a different torch, a different venv
+    cuda_visible_devices: "1"
+```
+
+| backend | when | cost |
+|---|---|---|
+| `inprocess` | no conflict (default) | none — direct call |
+| `subprocess` | two models disagree on versions | 0.01 s start, then a resident worker |
+| `http` | separate host / independent restart | one loopback round trip |
+| container | CUDA or system-library conflict | GB-scale images |
+
+The subprocess backend sends frames over a binary pipe (raw `uint8` pixels, not JSON — a
+640×480 frame is 921 KB raw vs ~15 MB as text) and loads the model once, so per-request
+overhead is milliseconds. A dead or unavailable worker maps to Percept
+`status="unavailable"`, never `not_found`.
+
+Setting up an isolated model environment:
+
+```bash
+uv venv .venvs/sam3 -p 3.10
+uv pip install --python .venvs/sam3/bin/python -r requirements/sam3.txt
+```
+
+The worker needs only `numpy` + `pydantic` beyond the model's own framework — it imports
+percepta's protocol and schema, nothing heavier. Each model gets its own GPU via
+`cuda_visible_devices` so workers never fight over VRAM.
+
+Full design, wire protocol and the checklist for adding a model:
+[`docs/model-isolation.md`](docs/model-isolation.md).
+
+### Adding a model — checklist
+
+1. Does it conflict with an existing model's `torch`/`numpy`? No → `inprocess`; yes → `subprocess`.
+2. Pin versions exactly in `requirements/<model>.txt` (never `>=`).
+3. Declare `backend` and `cuda_visible_devices` in the config.
+4. Tool code depends only on the backend protocol — never `import torch` at module level.
+5. Ship a fake adapter so the logic is testable without a GPU (see
+   [`backends/reference.py`](src/percepta/backends/reference.py)).
+6. Weights via config injection only — never in git or an image.
+7. `/healthz` must report an uninstalled model as `error`, never `ok`.
+
 
 ## Geometry and coordinates
 

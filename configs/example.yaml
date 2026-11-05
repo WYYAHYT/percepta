@@ -14,6 +14,16 @@ pipeline:
 tools:
   sam3:
     enabled: true
+    # Where the model runs (docs/model-isolation.md):
+    #   inprocess  — torch installed in this same environment (default, fastest)
+    #   subprocess — torch lives in .venvs/sam3 (use when another model needs a
+    #                different torch/numpy version)
+    #   http       — a separate model service, possibly on another machine
+    backend: inprocess
+    # Only used when backend: subprocess
+    python: .venvs/sam3/bin/python
+    # One worker per GPU so workers never contend for VRAM (§7 of the isolation doc).
+    cuda_visible_devices: "0"
     checkpoint: /models/sam3.pt
     resolution: 1008
     min_score: 0.2

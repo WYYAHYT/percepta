@@ -560,6 +560,7 @@ percepta/
 | v0.1 | 2026-11-04 | 首版：schema、坐标、工具协议、HTTP、几何、验证、里程碑 |
 | v0.1.1 | 2026-11-04 | 新增 §19.1 实现取向（D1–D12）：`unsupported_prompt` 映射、`ToolContext.extras`、棱柱高度搜索离散化、单次工具调用、`pipeline.py` 等 |
 | v0.1.2 | 2026-11-04 | 补充 D13–D21：验证结果状态优先级、geometry 工具与 `fused` 去重、visual-hull 横截面、`tool_unavailable` 的 HTTP 200 取向（偏离附录 A，待复核）、prompt 无关工具、健康检查隐藏未启用工具、缓存 key 的 options 子集 |
+| v0.1.3 | 2026-11-05 | 补充 D22–D26：改用 uv 管理依赖、修正 torch/sam3/numpy 版本约束、**模型隔离后端抽象**（`inprocess`/`subprocess`/`http`，不用容器）、二进制分帧协议、包导入开销约束。新增 `docs/model-isolation.md` 与 `src/percepta/backends/` |
 
 ---
 
@@ -600,6 +601,11 @@ percepta/
 | D19 | §11.3 的 `ok|loading|error` 词汇表没有"未启用" | `config.tools.<name>.enabled: false` 的工具**不出现在** `/healthz`、`/v1/tools`、`/v1/info` 中（缺席即"不属于本次部署"），绝不伪装成 `ok`；`lazy`（导入成功、按需加载）仍映射为 `ok` |
 | D20 | §11.4 缓存 key 的"options 相关子集"具体指什么 | 仅纳入**影响结果**的 `masks`/`min_score`/`top_k`；`tools`/`fuse`/`timeout_ms`/`cache` 与 `context` 不纳入；缓存只作用于**首个无上游**的阶段（后续阶段依赖上游 Percept，key 无法覆盖） |
 | D21 | 未知工具名 vs 已配置但加载失败 | 未知工具名 = 调用方错误 → HTTP 400 `invalid_request`；已配置却加载失败/加载后不可用 → HTTP 200 + Percept `status="unavailable"`（见 D17），永不降级为 `not_found` |
+| D22 | 依赖管理方式 | 改用 **uv** + 提交 `uv.lock`（必须用**官方源**生成，镜像会污染可移植性）+ `.python-version` 钉 3.10；dev 工具进 PEP 735 `dependency-groups` 默认安装 |
+| D23 | 原有版本约束有误 | `torch>=2.1`→`>=2.7,<3`；`sam3`→`==0.1.4`；`numpy` 补 sam3 声明的 `<2.4` 上限 |
+| D24 | 不同模型的依赖互斥（如两个 torch 版本）如何共存 | 不用容器：把"模型跑在哪"做成配置项 `tools.<name>.backend`，抽象为 `inprocess`/`subprocess`/`http` 三种后端；容器仅留作 CUDA/系统库级冲突的最后手段。详见 `docs/model-isolation.md` |
+| D25 | 跨进程/跨机传输格式 | 二进制分帧协议（magic + version + 长度前缀），仅 prompt/status 用 JSON；640×480 帧裸字节 921KB 对比 JSON 约 15MB。worker 只许写 stderr，stdout 归协议。worker 死亡 → `unavailable`，永不 `not_found` |
+| D26 | 包 `__init__` 的导入开销 | 仅 `schema` 急加载，其余公共名走惰性 `__getattr__`；否则瘦环境里的 worker 会因缺 pyyaml/pillow 而启动失败。worker 环境只需 `numpy`+`pydantic` |
 
 ---
 

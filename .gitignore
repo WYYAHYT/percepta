@@ -27,3 +27,6 @@ weights/
 *.log
 .DS_Store
 /tmp/
+
+# Per-model isolated virtualenvs (docs/model-isolation.md)
+.venvs/

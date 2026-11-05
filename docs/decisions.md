@@ -203,3 +203,68 @@ key cannot represent.
 same class as the §4.6 size mismatch). A tool that is configured but fails to load, or loads
 and then cannot serve, produces `status="unavailable"` Percepts inside HTTP 200 + a
 `tool_unavailable` warning. Neither case may ever be reported as `not_found`.
+
+## D22 — Dependency management is uv, with a portable lock file
+
+*Context:* the project previously used `pip install --user` with unpinned ranges, which was
+neither reproducible nor isolated (the host has no `python3-venv` and no passwordless sudo).
+
+*Decision:* `uv` with a committed `uv.lock` resolved against the **official** PyPI index, and
+`.python-version` pinning 3.10. Dev tooling moved to a PEP 735 `dependency-groups.dev`
+installed by default, because a fresh clone must be able to run the test suite.
+
+The lock file must never be generated under a mirror: doing so bakes mirror URLs into every
+download entry and breaks any machine that cannot reach that mirror. This host is an example —
+PyPI official takes ~23 s per request through its proxy while a domestic mirror takes 0.15 s,
+so it is tempting to re-lock under the mirror and quietly make the lock non-portable.
+
+## D23 — Two dependency constraints were wrong and were corrected
+
+*Decision:* `torch>=2.1` → `torch>=2.7,<3` (sam3 0.1.4 requires 2.7+ and does not work on
+2.1), `sam3` → `sam3==0.1.4` (its 0.1.x constructor/processor API still moves, so an open
+range guarantees breakage), and `numpy` gained the `<2.4` ceiling sam3 declares but the
+project had left unconstrained. These were latent bugs found by reading the real package
+rather than the spec's description of it.
+
+## D24 — Model isolation without containers: a backend abstraction
+
+*Context:* two perception models may require mutually exclusive `torch`/`numpy` versions. A
+single Python process can hold only one of each, so this cannot be configured away.
+
+*Decision:* "where the model runs" becomes configuration (`tools.<name>.backend`) rather than
+code, behind a small protocol (`set_image` / `segment` / `close` / `describe`):
+
+* `inprocess` — same environment; default, no IPC;
+* `subprocess` — the model lives in its own virtualenv, driven over a binary pipe;
+* `http` — a separate service, possibly on another host.
+
+Containers remain the last resort, reserved for CUDA/system-library conflicts that process
+isolation cannot fix. Measured on this host: two venvs with `numpy` 1.26.4 and 2.2.6 coexist,
+a parent process drives a model in the other venv, and interpreter cold start is 0.01 s.
+Design and wire protocol: `docs/model-isolation.md`.
+
+## D25 — The wire protocol is binary, not JSON
+
+*Decision:* request/response frames are length-prefixed binary with magic numbers and a
+version field; only the prompt and status travel as JSON. Rationale: a 640×480×3 frame is
+921 KB raw but ~15 MB as JSON text, and a magic check turns stream desynchronisation (a
+crashed worker, a stray `print()` on stdout) into an immediate error instead of garbage
+pixels. The worker logs to stderr only — stdout is the protocol.
+
+A killed or unresponsive worker maps to `status="unavailable"`, never `not_found` (the same
+rule as D17/§16.4: "I could not look" must stay distinguishable from "I looked and found
+nothing").
+
+## D26 — `percepta/__init__` must import cheaply
+
+*Context:* a worker running in an isolated virtualenv imports
+`percepta.backends.protocol` and `percepta.schema`. An eager `from .config import …` in the
+package `__init__` dragged in pyyaml, and `.masks` dragged in pillow — so a worker in a slim
+environment failed with `ModuleNotFoundError: No module named 'yaml'` before it ever reached
+the model.
+
+*Decision:* only `schema` (pydantic + stdlib) is imported eagerly; every other public name
+(`AppConfig`, `ToolRegistry`, `encode_rle`, `PerceiveClient`, `compare`, …) is resolved
+lazily via module `__getattr__`. The consequence is a hard rule for worker environments: a
+worker needs exactly `numpy` + `pydantic` beyond its own framework, which is what makes the
+isolation boundary thin enough to be practical.

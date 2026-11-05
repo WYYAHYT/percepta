@@ -31,6 +31,9 @@ from typing import Any
 
 import numpy as np
 
+from ..backends import BackendRequestError, BackendUnavailable, resolve_backend_kind
+from ..backends.http_backend import HttpBackend
+from ..backends.subprocess_backend import SubprocessBackend
 from ..schema import Percept, Prompt, ToolCapabilities, ToolContext
 from .base import (
     BaseTool,
@@ -59,7 +62,14 @@ def _sha256_file(path: Path, chunk: int = 1 << 20) -> str:
 
 
 class _Sam3Backend:
-    """Real backend: heavy imports happen in ``__init__`` only (called from ``load()``)."""
+    """Real in-process adapter: heavy imports happen in ``__init__`` only (called from ``load()``).
+
+    It satisfies :class:`percepta.backends.base.ModelBackend`, which is what lets the same
+    tool run this object directly, or ask a worker in another virtualenv to run it
+    (``docs/model-isolation.md``).
+    """
+
+    name = "sam3-inprocess"
 
     def __init__(self, checkpoint: str | Path, device: str, resolution: int) -> None:
         try:
@@ -185,18 +195,63 @@ class Sam3Tool(BaseTool):
 
     def load(self, config: dict[str, Any]) -> None:
         super().load(config)
-        checkpoint = config.get("checkpoint")
-        if not checkpoint:
-            raise ToolUnavailable(
-                "sam3 tool requires tools.sam3.checkpoint (weights are never vendored)"
+        # ``backend_factory`` was the original CI seam (a fake adapter); keep it working and
+        # give it priority so tests never spawn a process.
+        if self._backend_factory is not None:
+            self._backend = self._backend_factory(
+                checkpoint=config.get("checkpoint"),
+                device=config.get("device") or "cpu",
+                resolution=int(config.get("resolution", 1008)),
             )
-        device = config.get("device") or self._default_device()
-        factory = self._backend_factory or _Sam3Backend
-        self._backend = factory(
-            checkpoint=checkpoint,
-            device=device,
-            resolution=int(config.get("resolution", 1008)),
-        )
+            self._image_key = None
+            return
+
+        kind = resolve_backend_kind(config)
+        if kind == "inprocess":
+            checkpoint = config.get("checkpoint")
+            if not checkpoint:
+                raise ToolUnavailable(
+                    "sam3 tool requires tools.sam3.checkpoint (weights are never vendored)"
+                )
+            device = config.get("device") or self._default_device()
+            self._backend = _Sam3Backend(
+                checkpoint=checkpoint,
+                device=device,
+                resolution=int(config.get("resolution", 1008)),
+            )
+        elif kind == "subprocess":
+            self._backend = SubprocessBackend(
+                python=str(config.get("python") or "python3"),
+                module=str(config.get("worker_module") or "percepta.backends.worker"),
+                config={
+                    "backend_factory": str(
+                        config.get("worker_backend_factory")
+                        or "percepta.tools.sam3:_Sam3Backend"
+                    ),
+                    "backend_args": {
+                        "checkpoint": config.get("checkpoint"),
+                        "device": config.get("device") or "cuda",
+                        "resolution": int(config.get("resolution", 1008)),
+                    },
+                },
+                timeout_s=float(config.get("timeout_s", 120.0)),
+                cuda_visible_devices=config.get("cuda_visible_devices"),
+            )
+        elif kind == "http":
+            endpoint = config.get("endpoint")
+            if not endpoint:
+                raise ToolUnavailable(
+                    "sam3 backend 'http' requires tools.sam3.endpoint "
+                    "(e.g. http://127.0.0.1:8801)"
+                )
+            self._backend = HttpBackend(
+                endpoint=str(endpoint),
+                timeout_s=float(config.get("timeout_s", 120.0)),
+                token=config.get("token"),
+            )
+        else:  # pragma: no cover - resolve_backend_kind already validated
+            raise ToolUnavailable(f"unsupported backend {kind!r}")
+
         self._image_key = None
         if config.get("warmup", False):  # pragma: no cover - GPU only
             self._warmup()
@@ -264,7 +319,7 @@ class Sam3Tool(BaseTool):
         mask_b64 = ctx.options.masks
         try:
             masks, boxes, scores = self._backend.segment(prompt)
-        except Sam3BackendError as exc:
+        except (Sam3BackendError, BackendRequestError) as exc:
             model, model_sha = self._model_meta()
             provenance = self._provenance(
                 ctx,
@@ -281,6 +336,26 @@ class Sam3Tool(BaseTool):
                 camera=camera,
                 message=str(exc),
                 extras={"code": "unsupported_prompt"},
+            )
+        except BackendUnavailable as exc:
+            # A dead worker / unreachable service is "I could not look", which must never be
+            # reported as ``not_found`` (spec §16.4).
+            model, model_sha = self._model_meta()
+            provenance = self._provenance(
+                ctx,
+                started_at,
+                camera=camera,
+                prompt=prompt,
+                model=model,
+                model_sha256=model_sha,
+            )
+            return make_percept(
+                percept_id=percept_id,
+                status="unavailable",
+                provenance=provenance,
+                camera=camera,
+                message=str(exc),
+                extras={"code": "tool_unavailable"},
             )
 
         order = np.argsort(-scores) if scores.size else np.array([], dtype=int)
