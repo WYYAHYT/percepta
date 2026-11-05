@@ -33,6 +33,20 @@ regenerate `uv.lock` under a mirror** — it bakes mirror URLs into every downlo
 breaks machines that cannot reach that mirror. If you must re-lock, do it against
 `https://pypi.org/simple` (through the proxy).
 
+**This rule is now enforced, not just documented** (it was violated twice anyway):
+
+```bash
+python scripts/check_lock_portability.py          # exits 1 on any mirror URL
+python scripts/check_lock_portability.py --list   # show every domain and its count
+```
+
+It runs as the first CI step (`.github/workflows/ci.yml`), before any install — a bad lockfile
+fails every download, so checking it first turns a wall of "not found" into one clear message.
+Lockfiles are also checked for staleness with `uv lock --check` in both projects.
+
+Every model runtime lives in its own locked project under `uv_envs/<model>/` (D33) — there is
+deliberately **no** `sam3` extra in the root `pyproject.toml`.
+
 If you need another package, stop and ask the Lead: spec §16.3 forbids new default
 dependencies. Add it to the right extra, then `uv lock`.
 

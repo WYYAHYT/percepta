@@ -450,3 +450,29 @@ simulator environments, and the ambiguity is not worth the shorter name.
 The root `pyproject.toml` therefore has **no** `sam3` extra. The library still constrains
 model *assets* (`checkpoint_sha256`, D27) — dependencies are the deployer's, assets are the
 library's contract.
+
+## D34 — Lockfile portability is enforced by CI, not by documentation
+
+*Context:* `uv` writes the absolute download URL of every package into `uv.lock`. Generating a
+lock while `UV_DEFAULT_INDEX` points at a mirror therefore bakes that mirror into ~600 entries,
+and the lock works only on machines that can reach it. This repository shipped a lockfile with
+**631 aliyun URLs** — twice. Both times the rule "do not lock against a mirror" was already
+written in `AGENTS.md`; both times it was violated anyway, because the mirror is 150× faster
+and the mistake is invisible until someone else clones the repo.
+
+*Decision:* a whitelist checker runs as the **first** CI step
+(`scripts/check_lock_portability.py`, decision enforced by
+`.github/workflows/ci.yml`). Only `pypi.org`, `files.pythonhosted.org` and PyTorch's two index
+hosts are accepted. Unknown hosts fail too, with a message pointing at `ALLOWED_HOSTS` — adding
+a host should be a deliberate, reviewable act rather than a silent slide.
+
+Two details that matter:
+
+* **Whitelist, not blacklist.** A new unknown host is more likely a mistake or a supply-chain
+  risk than an intentional choice, so it must be justified explicitly.
+* **It runs before `uv sync`.** A non-portable lockfile fails *every* download, so checking it
+  first converts a screenful of "not found" errors into one actionable message naming the
+  mirror and the fix.
+
+`uv lock --check` is *not* sufficient on its own: it validates that the lock matches
+`pyproject.toml`, not that the URLs inside it are reachable from anywhere. Both are now run.
