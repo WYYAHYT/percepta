@@ -268,3 +268,42 @@ the model.
 lazily via module `__getattr__`. The consequence is a hard rule for worker environments: a
 worker needs exactly `numpy` + `pydantic` beyond its own framework, which is what makes the
 isolation boundary thin enough to be practical.
+
+## D27 — The library does not manage model dependencies, but does police model assets
+
+*Context (dependency side):* an earlier iteration shipped a `requirements/` directory with
+one pinned dependency file per model, plus a `docker/` directory. Both were removed on the
+grounds that a *library* should not maintain a list of what a *model* needs: it would have to
+track every upstream model's release cadence, and different deployments have different
+CUDA/driver combinations for which no universal answer exists.
+
+*Decision (dependency side):* the repository ships no model dependency manifests. Model
+frameworks are installed by the deployer into whatever interpreter they like, and percepta is
+told where via `tools.<name>.backend` / `python`. What the library does guarantee is
+narrow and durable: it **finds** third-party tools (the `percepta.tools` entry-point group),
+**calls** them through the backend protocol, and **constrains their assets**.
+
+*Context (asset side):* weights are the failure mode that hurts most, because it is silent —
+a truncated or wrong-version checkpoint can load successfully and then produce quietly wrong
+segments. The previous code only *recorded* a hash; it never compared one.
+
+*Decision (asset side):* every tool that needs weights declares
+`checkpoint` (a path or a remote URI), an optional `checkpoint_sha256`, and a
+`verify_weights` mode:
+
+| mode | behaviour | purpose |
+|---|---|---|
+| `if-declared` (default) | verify when a hash is configured, otherwise record only | exploration stays usable; production configs become safe by default |
+| `always` | refuse a local file with no declared hash | CI / production |
+| `never` | skip verification | escape hatch for huge weights on slow disks |
+
+`percepta models check` performs the same check before the service starts, and reports
+existence, observed hash, and whether it was *actually compared* — `verified: false` means
+"recorded only" and is never overstated to `true`.
+
+One trap is worth recording: YAML parses an all-digit hash (e.g. 64 zeros) as an **integer**,
+and `int(0)` is falsy — an `or`-chain then dropped the expected hash and skipped verification
+*without a word*. The truncated-checkpoint case could therefore load silently. The code now
+requires an explicit `is not None` and rejects a numeric-looking hash with a message telling
+the operator to quote it in YAML. A test pins both halves: mismatch fails loudly, and an
+unquoted numeric hash is rejected rather than silently ignored.

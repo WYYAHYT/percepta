@@ -31,6 +31,7 @@ from .config import load_config
 from .pipeline import prepare_tools
 from .registry import ToolEntry, ToolRegistry
 from .schema import Calibration, PerceiveOptions, PerceiveResponse, Prompt
+from .weights import WeightError, resolve_weights
 
 __all__ = ["main", "parse_prompt"]
 
@@ -132,6 +133,21 @@ def build_parser() -> argparse.ArgumentParser:
     probe.add_argument("--token", default=None)
     probe.add_argument("--json", dest="json_output", action="store_true")
     probe.set_defaults(handler=_cmd_probe)
+
+    # -- models ----------------------------------------------------------
+    models = subparsers.add_parser("models", help="inspect model weight assets")
+    models_sub = models.add_subparsers(dest="models_command", metavar="{check}")
+    models_check = models_sub.add_parser(
+        "check", help="verify configured checkpoints exist and match their sha256"
+    )
+    models_check.add_argument("--config", type=Path, default=None)
+    models_check.add_argument(
+        "--no-hash",
+        action="store_true",
+        help="only check existence, skip hashing (fast; misses corrupt files)",
+    )
+    models_check.add_argument("--json", dest="json_output", action="store_true")
+    models_check.set_defaults(handler=_cmd_models_check)
 
     return parser
 
@@ -357,6 +373,65 @@ def _cmd_probe(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 # Formatting
 # ---------------------------------------------------------------------------
+
+
+def _cmd_models_check(args: argparse.Namespace) -> int:
+    """Verify every configured checkpoint before the service ever starts.
+
+    This exists because a wrong or truncated checkpoint is the failure mode that hurts most:
+    it can load successfully and then produce quietly wrong segments. Checking here turns
+    that into an actionable message instead of a mysterious quality regression.
+    """
+    config = load_config(args.config)
+    rows: list[dict[str, Any]] = []
+
+    for name, raw in (config.tools or {}).items():
+        tool_config = dict(raw or {})
+        if not tool_config.get("enabled", True):
+            continue
+        location = tool_config.get("checkpoint")
+        if not location:
+            continue  # tools without weights (geometry) have nothing to check
+        row: dict[str, Any] = {
+            "tool": name,
+            "backend": str(tool_config.get("backend", "inprocess")),
+            "location": str(location),
+        }
+        try:
+            spec = resolve_weights(
+                location,
+                expected_sha256=tool_config.get("checkpoint_sha256"),
+                verify="never" if args.no_hash else str(tool_config.get("verify_weights", "if-declared")),
+                what=f"{name} checkpoint",
+            )
+            row.update(spec.describe())
+            row["ok"] = True
+        except WeightError as exc:
+            row.update({"ok": False, "error": str(exc)})
+        rows.append(row)
+
+    ok = all(row["ok"] for row in rows)
+    report = {
+        "ok": ok,
+        "config": str(args.config) if args.config else None,
+        "models": rows,
+    }
+    if args.json_output:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    else:
+        print(f"percepta models check: {'ok' if ok else 'FAILED'}")
+        if not rows:
+            print("  (no tools with a `checkpoint` configured)")
+        for row in rows:
+            mark = "ok" if row["ok"] else "FAIL"
+            sha = row.get("observed_sha256") or "-"
+            verified = "verified" if row.get("verified") else "recorded-only"
+            print(f"  [{mark}] {row['tool']} ({row['backend']}): {row['location']}")
+            if row["ok"]:
+                print(f"        sha256 {sha} ({verified})")
+            else:
+                print(f"        {row['error'].splitlines()[0]}")
+    return 0 if ok else 1
 
 
 def _local_tool_row(entry: ToolEntry) -> dict[str, Any]:

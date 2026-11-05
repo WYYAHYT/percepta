@@ -21,7 +21,6 @@ this file changes — that is exactly why the spec forbids leaking it into the s
 
 from __future__ import annotations
 
-import hashlib
 import threading
 import time
 import uuid
@@ -35,6 +34,7 @@ from ..backends import BackendRequestError, BackendUnavailable, resolve_backend_
 from ..backends.http_backend import HttpBackend
 from ..backends.subprocess_backend import SubprocessBackend
 from ..schema import Percept, Prompt, ToolCapabilities, ToolContext
+from ..weights import WeightError, resolve_weights
 from .base import (
     BaseTool,
     ToolUnavailable,
@@ -53,12 +53,6 @@ class Sam3BackendError(RuntimeError):
     """The upstream SAM3 build could not satisfy the request (API drift, bad state)."""
 
 
-def _sha256_file(path: Path, chunk: int = 1 << 20) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(chunk), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 class _Sam3Backend:
@@ -71,7 +65,14 @@ class _Sam3Backend:
 
     name = "sam3-inprocess"
 
-    def __init__(self, checkpoint: str | Path, device: str, resolution: int) -> None:
+    def __init__(
+        self,
+        checkpoint: str | Path,
+        device: str,
+        resolution: int,
+        checkpoint_sha256: str | None = None,
+        verify_weights: str = "if-declared",
+    ) -> None:
         try:
             import sam3  # noqa: PLC0415
             import torch  # noqa: PLC0415 - deliberately lazy (spec §16.2)
@@ -81,19 +82,35 @@ class _Sam3Backend:
                 f"({type(exc).__name__}: {exc})"
             ) from exc
 
-        checkpoint_path = Path(checkpoint)
-        if not checkpoint_path.is_file():
-            raise ToolUnavailable(f"SAM3 checkpoint not found: {checkpoint_path}")
+        # Validate BEFORE importing the framework path is used, so a wrong checkpoint fails
+        # with a clear message instead of an obscure torch load error.
+        try:
+            spec = resolve_weights(
+                checkpoint,
+                expected_sha256=checkpoint_sha256,
+                verify=verify_weights,
+                what="SAM3 checkpoint",
+            )
+        except WeightError as exc:
+            raise ToolUnavailable(str(exc)) from exc
+        if spec.path is None:
+            raise ToolUnavailable(
+                f"SAM3 checkpoint must be a local file, got {spec.location!r}"
+            )
 
         self._torch = torch
         self.device = device
         self.resolution = int(resolution)
-        self.checkpoint = str(checkpoint_path)
-        self.model_sha256 = _sha256_file(checkpoint_path)
+        self.checkpoint = str(spec.path)
+        # Record the observed hash in provenance; ``weights_verified`` says whether it was
+        # actually compared against an expected value (never overstate this).
+        self.model_sha256 = spec.observed_sha256
+        self.weights_verified = spec.verified
+        self._weights_spec = spec
 
         self.model = sam3.build_sam3_image_model(
             device,
-            str(checkpoint_path),
+            str(spec.path),
             load_from_HF=False,
             enable_inst_interactivity=True,
         )
@@ -218,6 +235,8 @@ class Sam3Tool(BaseTool):
                 checkpoint=checkpoint,
                 device=device,
                 resolution=int(config.get("resolution", 1008)),
+                checkpoint_sha256=config.get("checkpoint_sha256"),
+                verify_weights=str(config.get("verify_weights", "if-declared")),
             )
         elif kind == "subprocess":
             self._backend = SubprocessBackend(

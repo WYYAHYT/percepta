@@ -160,11 +160,12 @@ The subprocess backend sends frames over a binary pipe (raw `uint8` pixels, not 
 overhead is milliseconds. A dead or unavailable worker maps to Percept
 `status="unavailable"`, never `not_found`.
 
-Setting up an isolated model environment:
+Setting up an isolated model environment is the deployer's job, not the library's — you own
+the interpreter, percepta only needs to be told where to find it:
 
 ```bash
 uv venv .venvs/sam3 -p 3.10
-uv pip install --python .venvs/sam3/bin/python -r requirements/sam3.txt
+uv pip install --python .venvs/sam3/bin/python torch==2.7.0 sam3==0.1.4
 ```
 
 The worker needs only `numpy` + `pydantic` beyond the model's own framework — it imports
@@ -177,13 +178,12 @@ Full design, wire protocol and the checklist for adding a model:
 ### Adding a model — checklist
 
 1. Does it conflict with an existing model's `torch`/`numpy`? No → `inprocess`; yes → `subprocess`.
-2. Pin versions exactly in `requirements/<model>.txt` (never `>=`).
-3. Declare `backend` and `cuda_visible_devices` in the config.
-4. Tool code depends only on the backend protocol — never `import torch` at module level.
-5. Ship a fake adapter so the logic is testable without a GPU (see
+2. Declare `backend` and `cuda_visible_devices` in the config.
+3. Tool code depends only on the backend protocol — never `import torch` at module level.
+4. Ship a fake adapter so the logic is testable without a GPU (see
    [`backends/reference.py`](src/percepta/backends/reference.py)).
-6. Weights via config injection only — never in git or an image.
-7. `/healthz` must report an uninstalled model as `error`, never `ok`.
+5. Weights and their checksum come from config — never from the repository.
+6. `/healthz` must report an uninstalled model as `error`, never `ok`.
 
 
 ## Geometry and coordinates
@@ -227,25 +227,24 @@ src/percepta/
   cache.py        LRU + TTL (§11.4)
   config.py       YAML config (§11.1)
   service/        FastAPI app, routes, logging, metrics
+  backends/       where a model runs: inprocess / subprocess / http
   client.py, cli.py
   tools/          base, fake, sam3, multi_view_3d
-tests/            unit/, contract/, golden/, gpu/ (skipped by default)
-docker/, systemd/, configs/, docs/
+tests/            unit/, contract/, gpu/ (skipped by default)
+systemd/, configs/, docs/
 ```
 
 ## Deploying
 
 ```bash
-# container
-docker build -f docker/Dockerfile -t percepta:0.1 .
-docker run --rm -p 127.0.0.1:8790:8790 -v /models:/models:ro percepta:0.1
-
-# systemd
 sudo cp systemd/perceptad.service /etc/systemd/system/
 sudo systemctl enable --now perceptad
 ```
 
-Mount weights read-only; they are never built into the image.
+Weights are mounted read-only from the host (`checkpoint: /models/sam3.pt`); they are never
+copied into the repository. Packaging this as a container image is left to the deployer —
+`percepta` itself stays dependency-light, and a model's framework belongs to that model's own
+environment (see [Model isolation](#model-isolation-dependency-conflicts)).
 
 ## Testing
 

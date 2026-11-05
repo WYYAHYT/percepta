@@ -43,7 +43,7 @@ dependencies. Add it to the right extra, then `uv lock`.
 | **Lead** | `pyproject.toml`, `src/percepta/{__init__,schema,masks,registry,config,prompts}.py`, `src/percepta/tools/{__init__,base,fake}.py`, `src/percepta/tools/sam3.py`, `tests/{conftest,synth}.py`, `AGENTS.md`, `README.md`, `docs/**`, `configs/**` |
 | **service** | `src/percepta/service/*`, `pipeline.py`, `client.py`, `cli.py`, `tests/contract/**`, `tests/unit/test_client.py`, `tests/unit/test_pipeline.py` |
 | **geometry** | `src/percepta/{geometry,fusion}.py`, `src/percepta/tools/multi_view_3d.py`, `tests/unit/test_{geometry,fusion}.py`, `tests/synth_geom.py` |
-| **state** | `src/percepta/{cache,verification}.py`, `tests/unit/test_{cache,verification}.py`, `docker/**`, `systemd/**` |
+| **state** | `src/percepta/{cache,verification}.py`, `tests/unit/test_{cache,verification}.py`, `systemd/**` |
 
 Never edit a file you do not own — send the owner a message instead. `tests/synth.py` is
 shared and **read-only** for everyone but the Lead (add geometry fixtures to

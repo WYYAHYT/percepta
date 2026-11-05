@@ -476,17 +476,20 @@ percepta/
 │   ├── client.py             # PerceptaClient + perceive_local
 │   ├── cli.py
 │   └── tools/{base.py,fake.py,sam3.py,multi_view_3d.py}
+├── src/percepta/backends/     # 模型跑在哪：inprocess / subprocess / http（v0.1.3 新增）
+│   └── {base,protocol,inprocess,subprocess_backend,http_backend,worker,reference}.py
 ├── tests/
-│   ├── unit/                 # schema/masks/geometry/prompts/verification
+│   ├── unit/                 # schema/masks/geometry/prompts/verification/backends/weights
 │   ├── contract/             # HTTP 契约（fake 工具，无 GPU）
-│   ├── golden/               # 合成图 + fake 工具
 │   └── gpu/                  # pytest -m gpu，默认跳过
-├── examples/
-├── docker/Dockerfile
 └── systemd/perceptad.service
 ```
 
 依赖（v0.1，最小集）：`pydantic>=2`、`numpy`、`pillow`、`pyyaml`、`fastapi`、`uvicorn`、`pytest`、`httpx`（测试）；`sam3` 走 extras（含 torch）。**不得**把 torch 设为默认依赖。
+
+依赖由 **uv** 管理（`uv.lock` + `.python-version`，见 D22）。**本仓库不维护任何模型框架的依赖清单**：
+模型依赖由部署方装进独立虚拟环境，通过 `tools.<name>.backend` / `python` 指过去（见 `docs/model-isolation.md`）。
+库只约束模型**权重的路径与完整性**（`checkpoint` / `checkpoint_sha256` / `verify_weights`，D27）。
 
 ---
 
@@ -561,6 +564,7 @@ percepta/
 | v0.1.1 | 2026-11-04 | 新增 §19.1 实现取向（D1–D12）：`unsupported_prompt` 映射、`ToolContext.extras`、棱柱高度搜索离散化、单次工具调用、`pipeline.py` 等 |
 | v0.1.2 | 2026-11-04 | 补充 D13–D21：验证结果状态优先级、geometry 工具与 `fused` 去重、visual-hull 横截面、`tool_unavailable` 的 HTTP 200 取向（偏离附录 A，待复核）、prompt 无关工具、健康检查隐藏未启用工具、缓存 key 的 options 子集 |
 | v0.1.3 | 2026-11-05 | 补充 D22–D26：改用 uv 管理依赖、修正 torch/sam3/numpy 版本约束、**模型隔离后端抽象**（`inprocess`/`subprocess`/`http`，不用容器）、二进制分帧协议、包导入开销约束。新增 `docs/model-isolation.md` 与 `src/percepta/backends/` |
+| v0.1.4 | 2026-11-05 | 补充 D27：明确库与模型依赖/资产的边界 —— **不维护模型依赖清单**（删除 `requirements/`、`docker/`），但**强制约束权重资产**（`checkpoint` / `checkpoint_sha256` / `verify_weights`，新增 `percepta models check`）。同时删除 §13 中未交付的 `tests/golden/` 与 `examples/` |
 
 ---
 
@@ -606,6 +610,7 @@ percepta/
 | D24 | 不同模型的依赖互斥（如两个 torch 版本）如何共存 | 不用容器：把"模型跑在哪"做成配置项 `tools.<name>.backend`，抽象为 `inprocess`/`subprocess`/`http` 三种后端；容器仅留作 CUDA/系统库级冲突的最后手段。详见 `docs/model-isolation.md` |
 | D25 | 跨进程/跨机传输格式 | 二进制分帧协议（magic + version + 长度前缀），仅 prompt/status 用 JSON；640×480 帧裸字节 921KB 对比 JSON 约 15MB。worker 只许写 stderr，stdout 归协议。worker 死亡 → `unavailable`，永不 `not_found` |
 | D26 | 包 `__init__` 的导入开销 | 仅 `schema` 急加载，其余公共名走惰性 `__getattr__`；否则瘦环境里的 worker 会因缺 pyyaml/pillow 而启动失败。worker 环境只需 `numpy`+`pydantic` |
+| D27 | 库与模型依赖/资产的边界 | **库不管理模型框架依赖**（不提供 requirements 清单，删除了 `requirements/`、`docker/`）；但**必须约束模型资产**：`checkpoint` 路径 + 可选 `checkpoint_sha256` + `verify_weights`（`if-declared`/`always`/`never`），并提供 `percepta models check` 启动前自检。理由：错误的权重会静默加载并输出错结果。YAML 纯数字哈希被解析为整数时**报错而非静默跳过** |
 
 ---
 

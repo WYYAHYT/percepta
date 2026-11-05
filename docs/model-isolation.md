@@ -93,22 +93,67 @@ tools:
 创建方式：
 
 ```bash
+# 部署方自己决定装什么 —— 这本库不提供、也不维护模型的依赖清单
 uv venv .venvs/sam3 -p 3.10
-uv pip install --python .venvs/sam3/bin/python -r requirements/sam3.txt
+uv pip install --python .venvs/sam3/bin/python torch==2.7.0 sam3==0.1.4
 ```
 
-### 5.2 主环境保持干净
+### 5.2 库的边界：不管模型依赖
+
+**本库不管理任何模型框架的依赖。** 没有 `requirements/depth.txt` 之类的文件，
+也没有"深度模型需要装什么"的答案，这些属于部署方。
+
+理由：一旦库开始维护模型依赖清单，它就得跟着每个上游模型的版本节奏走，
+必然腐化；而且不同部署的 CUDA / 驱动组合不同，库无法给出通用答案。
+
+库只保证三件事：
+
+1. **发现**：`percepta.tools` entry point 组能找到第三方工具实现；
+2. **调用**：工具通过 backend 协议被调用，不关心模型装在哪；
+3. **约束**：模型权重的**位置与完整性**由库校验（见 §5.4）。
+
+### 5.3 主环境保持干净
 
 主环境（`.venv`）**永远只装 `pyproject.toml` 的默认依赖 + `dev` 组**，
-不含任何模型框架。模型依赖写在 `requirements/<model>.txt`，供隔离环境安装。
+不含任何模型框架。这条规则保证主环境能在无 GPU 机器上安装并跑全量测试。
 
-这条规则保证：主环境可以在无 GPU 机器上安装、跑全量测试。
+模型依赖由部署方装进 `.venvs/<model>/.venvs` 或任意虚拟环境，
+然后通过 `tools.<name>.python` 指过去。
 
-### 5.3 为什么不用 extra 装进主环境
+### 5.4 模型资产契约（库负责的部分）
 
-`optional-dependencies` 仍然保留（用于只有一个模型、无冲突的简单场景），
-但**一旦出现冲突，extra 就无法表达"这两个不能同时装"**。
-`requirements/<model>.txt` 是冲突场景的唯一出路。
+依赖不管，但**资产要管** —— 因为权重的错误是静默的：截断或版本错误的文件
+可以"成功加载"，然后安静地输出错的结果。
+
+配置形态：
+
+```yaml
+tools:
+  sam3:
+    checkpoint: /models/sam3.pt        # 位置：绝不在仓库里
+    checkpoint_sha256: "abc123…"       # 可选：64 位十六进制，YAML 里必须加引号
+    verify_weights: if-declared        # if-declared | always | never
+```
+
+三种严格度：
+
+| 模式 | 行为 | 用途 |
+|---|---|---|
+| `if-declared`（默认） | 声明了哈希就校验，否则只记录 | 探索期可用，生产配置天然安全 |
+| `always` | 本地文件没有声明哈希就拒绝加载 | CI / 生产 |
+| `never` | 完全不校验 | 超大权重 + 慢磁盘的逃生门 |
+
+启动前自检：
+
+```bash
+percepta models check --config configs/example.yaml
+```
+
+它会在服务启动前报告每个 checkpoint 的**存在性、实际 sha256、是否真正比对过**。
+`verified: false` 表示"只记录未校验"，绝不谎报。
+
+注意：YAML 会把纯数字的哈希解析成整数（`int(0)` 为假值）。
+库对此**报错而非静默跳过**，并在消息里提示加引号。
 
 ## 6. 子进程通信协议（草案）
 
@@ -199,12 +244,12 @@ worker 启动时由主进程注入 `CUDA_VISIBLE_DEVICES`。好处：
 1. **判断冲突风险**：新模型要求的 `torch`/`numpy` 主版本与现有模型是否相容？
    - 相容 → 走 extra，`inprocess` 后端
    - 冲突 → 建独立 venv，`subprocess` 后端
-2. **写 `requirements/<model>.txt`**，版本钉死（不用 `>=`）
-3. **在 `configs/*.yaml` 里声明 backend 与 `cuda_visible_devices`**
+2. **依赖由部署方装进独立环境**，不写进本仓库的 pyproject
+3. **在 `configs/*.yaml` 里声明 backend、python 路径与 `cuda_visible_devices`**
 4. **工具实现只依赖 backend 抽象**，不直接 `import torch`
-5. **写一个 fake backend**，让逻辑能在无 GPU 环境测试（沿袭 `Sam3Tool(backend_factory=...)`）
-6. **权重走配置注入**，绝不进 git / 镜像
-7. **验证 `/healthz` 如实报告**：未装的模型应显示 `error`，不能显示 `ok`
+5. **写一个 fake backend**，让逻辑能在无 GPU 环境测试（见 `backends/reference.py`）
+6. **权重走配置注入**：`checkpoint` + `checkpoint_sha256`，绝不进 git
+7. **跑 `percepta models check`**，并在 `/healthz` 里如实报告未装模型为 `error`
 
 ## 9. 未决问题
 
