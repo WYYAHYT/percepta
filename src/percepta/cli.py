@@ -454,11 +454,14 @@ def _local_tool_row(entry: ToolEntry) -> dict[str, Any]:
                 "multi_view": caps.multi_view,
                 "geometry": caps.geometry,
             }
+    meta = entry.describe()
     return {
         "name": entry.name,
-        "version": str(getattr(instance, "version", "0.0.0")) if instance else "0.0.0",
+        # Version is a class attribute, so an unloaded tool still reports its real version
+        # instead of looking like a broken 0.0.0 plugin.
+        "version": str(getattr(instance, "version", None) or meta["version"]),
         "status": "ok" if entry.status in {"ok", "lazy"} else entry.status,
-        "kind": entry.kind,
+        "kind": meta["kind"],
         "source": entry.source,
         "capabilities": capabilities,
         "loaded": instance is not None,

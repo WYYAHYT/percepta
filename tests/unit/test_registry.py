@@ -112,3 +112,42 @@ def test_tool_context_carries_upstream_extras():
     assert ctx.extras["upstream"] == []
     assert ctx.logger is None and ctx.cache is None
     _ = Prompt(type="text", text="cup")
+
+
+def test_describe_reports_declared_metadata_before_load(registry):
+    """``describe()`` must not need a loaded instance to report version/kind.
+
+    Both are class attributes, so an unloaded tool can still answer "what am I?". The
+    default ``0.0.0`` is reserved for a class that genuinely declares no version.
+    """
+    registry.register("box_only", _BoxOnly)  # registered, deliberately not loaded
+    entry = registry.entry("box_only")
+    assert entry.instance is None
+    described = entry.describe()
+    assert described["version"] == "9.9.9"
+    assert described["kind"] == "detector"
+    assert described["loaded"] is False
+
+
+def test_describe_falls_back_to_zero_version_when_undeclared(registry):
+    class Nameless(BaseTool):
+        name = "nameless"
+
+        def capabilities(self):  # pragma: no cover - not called here
+            return ToolCapabilities(kind="fake")
+
+        def perceive(self, ctx, prompts):  # pragma: no cover
+            return []
+
+    registry.register("nameless", Nameless)
+    described = registry.entry("nameless").describe()
+    assert described["version"] == "0.0.0"
+    assert described["kind"] == "fake"  # inherited from BaseTool's class attribute
+
+
+def test_describe_prefers_loaded_instance_metadata(registry):
+    registry.register("box_only", _BoxOnly)
+    registry.instance("box_only")
+    described = registry.entry("box_only").describe()
+    assert described["version"] == "9.9.9"
+    assert described["loaded"] is True

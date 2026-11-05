@@ -67,13 +67,50 @@ class ToolEntry:
     lock: threading.RLock = field(default_factory=threading.RLock)
 
     def describe(self) -> dict[str, Any]:
-        return {"name": self.name, "version": _version(self), "status": self.status}
+        return {
+            "name": self.name,
+            "version": _version(self),
+            "status": self.status,
+            "kind": _kind(self),
+            "loaded": self.instance is not None,
+        }
+
+
+def _declared_meta(factory: Any) -> tuple[str | None, str | None]:
+    """Read ``version``/``kind`` off the tool *class*, without instantiating it.
+
+    Both are class attributes on :class:`~percepta.tools.base.PerceptionTool` /
+    ``BaseTool``, so an unloaded tool can still report them. Without this, a tool that is
+    registered but not loaded (no GPU, no weights, disabled) reports version ``0.0.0`` and
+    kind ``None`` — which reads like a broken plugin rather than "known but not loaded".
+
+    ``capabilities()`` cannot be used here because it needs an instance; the class-level
+    ``kind`` attribute is the only metadata available before ``load()``.
+
+    Returns ``(version, kind)``; each is ``None`` when the class does not declare it.
+    """
+    if factory is None:
+        return None, None
+    version = getattr(factory, "version", None)
+    kind = getattr(factory, "kind", None)
+    return (
+        None if version is None else str(version),
+        None if kind is None else str(kind),
+    )
 
 
 def _version(entry: ToolEntry) -> str:
     if entry.instance is not None:
         return str(getattr(entry.instance, "version", "0.0.0"))
-    return "0.0.0"
+    declared, _ = _declared_meta(entry.factory)
+    return declared or "0.0.0"
+
+
+def _kind(entry: ToolEntry) -> str | None:
+    if entry.kind is not None:
+        return entry.kind
+    _, declared = _declared_meta(entry.factory)
+    return declared
 
 
 def _resolve(spec: str) -> Any:

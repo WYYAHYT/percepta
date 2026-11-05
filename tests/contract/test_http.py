@@ -98,6 +98,45 @@ def test_healthz_reports_error_for_unloadable_tool() -> None:
     assert tools["broken"]["status"] == "error"
 
 
+def test_unloaded_tools_still_report_real_version_and_kind() -> None:
+    """A registered-but-unloaded tool must not look like a broken 0.0.0 plugin.
+
+    Regression: /healthz and /v1/tools carried their own duplicate version lookup that
+    returned the literal ``0.0.0`` whenever ``entry.instance is None``, while the CLI (which
+    used the registry) reported the real version. Both are class attributes now read through
+    ``ToolEntry.describe()``, so all three surfaces agree.
+    """
+
+    class Unloadable(BaseTool):
+        name = "unloadable"
+        version = "2.5.1"
+        kind = "segmenter"
+
+        def capabilities(self) -> ToolCapabilities:  # pragma: no cover - never reached
+            return ToolCapabilities(kind="segmenter")
+
+        def load(self, config) -> None:
+            raise RuntimeError("no weights")
+
+        def perceive(self, ctx, prompts):  # pragma: no cover - never reached
+            return []
+
+    registry = ToolRegistry()
+    registry.register("unloadable", Unloadable)
+    config = load_config(CI_CONFIG)
+    config.tools = {"unloadable": {"enabled": True}}
+    with TestClient(create_app(config, registry=registry)) as test_client:
+        health = {t["name"]: t for t in test_client.get("/healthz").json()["tools"]}
+        rows = {t["name"]: t for t in test_client.get("/v1/tools").json()["tools"]}
+
+    # Never loaded, yet the declared metadata is what an operator needs to see.
+    assert health["unloadable"]["version"] == "2.5.1"
+    assert health["unloadable"]["status"] == "error"
+    assert rows["unloadable"]["version"] == "2.5.1"
+    assert rows["unloadable"]["kind"] == "segmenter"
+    assert rows["unloadable"]["loaded"] is False
+
+
 def test_disabled_tools_are_absent_but_failing_enabled_tools_are_visible() -> None:
     """§11.3: a tool explicitly disabled is not part of this deployment, so it is not listed.
 

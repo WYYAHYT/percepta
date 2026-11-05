@@ -120,23 +120,24 @@ class ServiceState:
 
     def health_rows(self) -> list[dict[str, Any]]:
         rows = []
-        for entry, instance in self.entries():
-            version = getattr(instance, "version", None) or entry_version(entry)
+        for entry, _instance in self.entries():
+            declared = entry.describe()
             rows.append(
                 {
                     "name": entry.name,
-                    "version": version,
+                    # ``describe()`` reads version/kind off the tool *class*, so an
+                    # unloaded tool still reports its real version instead of 0.0.0.
+                    "version": declared["version"],
                     "status": _STATUS_MAP.get(entry.status, "error"),
                 }
             )
         return rows
 
 
-def entry_version(entry: ToolEntry) -> str:
-    instance = entry.instance
-    if instance is not None:
-        return str(getattr(instance, "version", "0.0.0"))
-    return "0.0.0"
+# NOTE: there is deliberately no local ``entry_version`` helper any more. Duplicating the
+# registry's logic here is what made /healthz and /v1/tools report ``0.0.0`` for tools that
+# were registered but never loaded (no GPU/weights) while the CLI reported the real version.
+# All introspection now goes through ``ToolEntry.describe()`` — one source of truth.
 
 
 # ---------------------------------------------------------------------------
@@ -177,11 +178,12 @@ def tool_capabilities_dict(instance: Any) -> dict[str, Any] | None:
 
 def tool_row(entry: ToolEntry) -> dict[str, Any]:
     instance = entry.instance
+    declared = entry.describe()
     row: dict[str, Any] = {
         "name": entry.name,
-        "version": entry_version(entry),
+        "version": declared["version"],
         "status": _STATUS_MAP.get(entry.status, "error"),
-        "kind": entry.kind,
+        "kind": declared["kind"],
         "source": entry.source,
         "capabilities": tool_capabilities_dict(instance),
         "model_sha256": getattr(instance, "model_sha256", None),
