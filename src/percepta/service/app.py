@@ -33,6 +33,7 @@ from .. import __version__
 from ..config import AppConfig
 from ..pipeline import PipelineRequestError, PipelineRunner, prepare_tools
 from ..registry import ToolRegistry
+from ..warmup import WarmupState, start_warmup
 from .logging import configure_logging
 from .routes import ServiceState, error_response, router
 
@@ -165,8 +166,27 @@ def create_app(
         semaphore=threading.BoundedSemaphore(max_queue) if max_queue > 0 else None,
     )
 
+    warmup_cfg = getattr(config, "warmup", None)
+    warmup_enabled = bool(getattr(warmup_cfg, "enabled", True))
+    warmup_state: WarmupState | None = None
+    warmup_thread: threading.Thread | None = None
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        nonlocal warmup_state, warmup_thread
+        # Warm up *inside* the lifespan, not at import: importing the app must stay free of
+        # side effects, and this is where the process is actually committed to serving.
+        warmup_state, warmup_thread = start_warmup(
+            state.runner,
+            size=(
+                int(getattr(warmup_cfg, "height", 480)),
+                int(getattr(warmup_cfg, "width", 640)),
+            ),
+            prompt=str(getattr(warmup_cfg, "prompt", "object")),
+            enabled=warmup_enabled,
+        )
+        state.warmup = warmup_state
+        _app.state.warmup = warmup_state
         try:
             yield
         finally:

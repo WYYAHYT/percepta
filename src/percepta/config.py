@@ -91,6 +91,21 @@ class MetricsConfig(_Section):
     enabled: bool = False
 
 
+class WarmupConfig(_Section):
+    """Startup warm-up: run one throwaway request so the first real one is not cold.
+
+    The first model call costs ~16 s (worker spawn + 3.2 GiB read + CUDA init) versus
+    250-520 ms afterwards, so this is worth doing before an Agent Policy connects.
+    """
+
+    enabled: bool = True
+    # Image size for the warm-up frame. Match the real workload so the same kernels and the
+    # same resolution path are exercised; a mismatched size warms the wrong shapes.
+    height: int = 480
+    width: int = 640
+    prompt: str = "object"
+
+
 class AppConfig(_Section):
     """The whole ``config.yaml`` for ``percepta serve`` / ``percepta probe``."""
 
@@ -101,6 +116,7 @@ class AppConfig(_Section):
     cache: CacheConfig = Field(default_factory=CacheConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
+    warmup: WarmupConfig = Field(default_factory=WarmupConfig)
 
     def tool_config(self, name: str) -> dict[str, Any]:
         return dict(self.tools.get(name) or {})

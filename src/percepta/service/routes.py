@@ -81,6 +81,9 @@ class ServiceState:
     runner: PipelineRunner
     semaphore: threading.BoundedSemaphore | None = None
     started_at: float = field(default_factory=time.monotonic)
+    # Set once the app's lifespan starts a background warm-up; ``None`` means no lifespan ran
+    # (e.g. a bare ``create_app()`` in a unit test), which /healthz reports as unknown.
+    warmup: Any = None
 
     @property
     def uptime_s(self) -> float:
@@ -237,9 +240,23 @@ def _torch_available() -> bool:
 
 @router.get("/healthz")
 def healthz(request: Request) -> dict[str, Any]:
-    """Liveness/readiness: always 200 while the process serves, tools carry the detail."""
+    """Liveness/readiness: always 200 while the process serves, tools carry the detail.
+
+    ``warmup`` separates "the port is listening" from "the model is actually hot". A caller
+    that cares about the ~16 s cold path can wait for ``warmup.status == "ok"``; a supervisor
+    that only wants liveness can ignore it. ``ok`` stays true either way — a failed warm-up
+    means the model is broken, which the ``tools[].status`` field already reports, and it is
+    not a reason to fail liveness.
+    """
     state = get_state(request)
-    return {"ok": True, "uptime_s": state.uptime_s, "tools": state.health_rows()}
+    body: dict[str, Any] = {
+        "ok": True,
+        "uptime_s": state.uptime_s,
+        "tools": state.health_rows(),
+    }
+    warmup = getattr(state, "warmup", None)
+    body["warmup"] = warmup.snapshot() if warmup is not None else {"status": "unknown"}
+    return body
 
 
 @router.get("/v1/info", dependencies=[Depends(authorize)])

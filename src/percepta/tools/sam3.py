@@ -362,8 +362,13 @@ class Sam3Tool(BaseTool):
             raise ToolUnavailable(f"unsupported backend {kind!r}")
 
         self._image_key = None
-        if config.get("warmup", False):  # pragma: no cover - GPU only
-            self._warmup()
+        # NOTE: there used to be a ``warmup`` flag here that ran a 32x32 all-zero frame. It was
+        # worse than useless: a tiny black image exercises different kernel shapes than a real
+        # frame (so the expensive autotuning still happened on the first real request), it
+        # tripled the checkpoint read cost by forcing a second set_image, and it could not be
+        # observed by anyone. Warm-up now belongs to the service layer
+        # (:mod:`percepta.warmup`), which sends a realistic frame through the whole pipeline
+        # and reports the outcome on /healthz.
 
     @staticmethod
     def _default_device() -> str:
@@ -383,12 +388,6 @@ class Sam3Tool(BaseTool):
                     self._backend = None
             self._image_key = None
             self._loaded = False
-
-    def _warmup(self) -> None:  # pragma: no cover - GPU only
-        dummy = np.zeros((32, 32, 3), dtype=np.uint8)
-        self._backend.set_image(dummy)
-        self._backend.segment(Prompt(type="text", text="object"))
-        self._image_key = None
 
     # -- inference -------------------------------------------------------
 

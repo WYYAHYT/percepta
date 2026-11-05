@@ -335,3 +335,34 @@ has died instead of silently respawning it and blaming the caller for not callin
 Testing note (D28.1): the GPU test **requires a real photograph** and skips without one.
 A synthetic colour-block scene is not evidence — SAM3 legitimately finds nothing in it, and
 letting that "pass" would manufacture false confidence.
+
+## D29 — Warm-up runs in the background, through the whole pipeline
+
+*Context:* the first SAM3 call costs ~16 s (worker spawn + 3.2 GiB checkpoint read + CUDA
+init + cuDNN autotuning); subsequent calls are 137-520 ms. An Agent Policy sending its first
+request into that cold path either times out or has to branch on "first call is slow".
+
+*Decision:* the service runs one throwaway request at startup, in a **background thread**, and
+reports the outcome on `/healthz` as `warmup: {status, duration_ms, error?}`.
+
+Measured on this host with real SAM3: first real request **16339 ms → 137 ms** (119×), with
+identical results.
+
+Four details that matter:
+
+1. **Background, not blocking startup.** A service that refuses connections for 16 s looks
+   broken to a supervisor, a container healthcheck, or a load balancer. The port binds
+   immediately; `/healthz` distinguishes "listening but cold" (`warmup.status: running`) from
+   "wrong port".
+2. **Through the real pipeline**, not a bare model call — the cost being removed spans image
+   decode, prompt handling, the forward pass and result assembly.
+3. **Never fatal.** A failed warm-up is recorded (`status: error`, with the reason) and the
+   service keeps serving. `ok` on `/healthz` stays true: a broken model is already reported by
+   `tools[].status` (D9), and liveness must not depend on a model loading.
+4. **`not_found` counts as success.** The warm-up frame is synthetic; the model correctly
+   reports no instances. Only `unavailable`/`invalid_request`/`timeout` count as failures.
+
+The previous `tools.sam3.warmup` flag was removed: it ran a 32×32 all-zero frame, which
+exercised different kernel shapes than a real frame (so the expensive autotuning still landed
+on the first real request), forced a second full checkpoint read, and was invisible to
+operators.
