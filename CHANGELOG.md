@@ -6,6 +6,37 @@ changed. Every design decision referenced as `D<n>` lives in [`docs/decisions.md
 
 ---
 
+## 0.2.2 — 2026-11-05
+
+### Fixed
+
+* **Appendix A contradicted itself on `tool_unavailable`** (D17, now resolved). The row said
+  "503 (Percept.status=`unavailable`)" — but a 503 response body is not a `PerceiveResponse`,
+  and a `Percept` only exists inside one. The table was corrected to **200**, so the spec and
+  the implementation finally agree instead of the code permanently being "a deviation awaiting
+  review".
+
+  `POST /v1/perceive` returns **200** with the affected Percepts carrying
+  `status="unavailable"`, `extras.code="tool_unavailable"`, a human-readable `message`, and a
+  top-level `warnings` entry. `/healthz` still reports the tool as `error`.
+
+  The deciding argument: this endpoint is a **batch** operation (one request may span several
+  cameras × prompts × tools). Answering 503 because one tool is down discards both the results
+  the other tools produced and the information about which tool failed.
+
+### Added
+
+* **Five contract tests for the unavailable path** — it previously had **none**, which is how
+  the disagreement survived so long. They cover: HTTP 200 rather than 503, the Percept status
+  and its `unavailable` ≠ `not_found` distinction, the top-level warning, `/healthz` reporting
+  `error`, and — most importantly — a healthy and a broken tool in the same pipeline where the
+  healthy tool's observations must survive.
+
+  Verified by mutation: forcing the endpoint to answer 503 makes three of them fail
+  immediately, so they genuinely pin the decision rather than passing vacuously.
+
+---
+
 ## 0.2.1 — 2026-11-05
 
 Engineering hardening after 0.2.0. No API changes; the wire format is untouched.

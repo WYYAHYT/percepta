@@ -170,9 +170,23 @@ multi-tool pipeline one dead tool must not discard what the others produced.
 
 *Decision:* `POST /v1/perceive` answers **200** with the affected Percepts carrying
 `status="unavailable"` plus a `tool_unavailable` warning; `/healthz` reports the tool as
-`error`. This is a deliberate, recorded deviation from appendix A's HTTP column and is
-flagged for user review — the alternative (503 carrying a `PerceiveResponse`) is a one-line
-change in `service/routes.py` if preferred.
+`error`.
+
+**Resolved in v0.2.2 — appendix A was the thing that was wrong.** The row read
+"503 (Percept.status=`unavailable`)", which contradicts itself: a 503 response body is not a
+`PerceiveResponse`, and a Percept only exists *inside* one. Rather than keep an implementation
+that permanently disagreed with its own spec, the table was corrected to 200 and D17 is no
+longer recorded as a deviation.
+
+The deciding argument is that this endpoint is inherently a **batch** operation (one request
+may span several cameras × prompts × tools). Answering 503 because one tool is unavailable
+discards two things at once: the results other tools already produced, and the information
+about *which* tool failed. Callers should read `percepts[].status` and `warnings`, not just the
+status code — and a supervisor reading `/healthz` still sees the tool as `error`.
+
+Locked down by five contract tests, including one that runs a healthy and a broken tool in the
+same pipeline and asserts the healthy tool's observations survive. Verified by mutation: forcing
+the endpoint to 503 makes three of them fail immediately.
 
 ## D18 — `capabilities().prompts == ∅` means "prompt-agnostic"
 

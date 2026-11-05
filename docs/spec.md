@@ -567,6 +567,7 @@ percepta/
 | v0.1.4 | 2026-11-05 | 补充 D27：明确库与模型依赖/资产的边界 —— **不维护模型依赖清单**（删除 `requirements/`、`docker/`），但**强制约束权重资产**（`checkpoint` / `checkpoint_sha256` / `verify_weights`，新增 `percepta models check`）。同时删除 §13 中未交付的 `tests/golden/` 与 `examples/` |
 | v0.2.0 | 2026-11-05 | 补充 D28–D32：**真实 SAM3 端到端验证通过**（S9 关闭，实测记录见 `docs/model-isolation.md` §10）、启动预热、`wait_until_ready` 等待热态、introspection 统一读类属性、空 `cuda_visible_devices` 语义修正。包版本升至 0.2.0，新增 `CHANGELOG.md` |
 | v0.2.1 | 2026-11-05 | 工程加固：模型运行时改为 `uv_envs/<model>/` 独立锁定项目（移除根 `sam3` extra，D33）、锁文件可移植性由 CI 强制检查（D34）、空 `cuda_visible_devices` 语义修正（D32）。包版本 0.2.1，新增首个 CI 工作流 |
+| v0.2.2 | 2026-11-05 | 附录 A 的 `tool_unavailable` 由 503 修正为 **200**，与 D17 实现对齐（消除 spec 自身矛盾）；D17 从「待复核」转为「已决」。补充该行的语义说明与调用方契约 |
 
 ---
 
@@ -602,7 +603,7 @@ percepta/
 | D14 | §10 的 `stable` 在缺第三份观测时如何判定 | 仅在 `options["stable_with"]` 给出时计算；`required` 默认取"所有可评估项"，支持收窄；`required` 收窄也不能让 `not_found` 通过；`required=["stable"]` 但无 `stable_with` → `ok=False` + `invalid_request` |
 | D15 | §5.3 的 geometry 工具与 §9 的 `fuse` 会重复计算几何 | geometry 类工具的 ok Percept 直接作为 `fused`，**不进入** `percepts`；仅当 pipeline 中无 geometry 类工具时才调用 `fusion.fuse`；该工具返回空 → `fused=null` + `geometry_unavailable` |
 | D16 | §9 算法 2 的横截面取法未定义 | 高度按 D4 决定；质心/包围盒/朝向改用"各视角在**中高**处的锥截面之交"（visual hull），以抵消单视角"阴影"偏差；`bbox3d` 是**上界**而非紧贴框；仰角扫描在首次达标处提前结束 |
-| D17 | 附录 A 的 `tool_unavailable → 503` 与"Percept 承载状态"冲突 | **保留 HTTP 200**，Percept 取 `status="unavailable"` + `tool_unavailable` 警告；`/healthz` 报 `error`。理由：503 的响应体无法是 `PerceiveResponse`，且多工具 pipeline 中单工具不可用不应吞掉其它工具的结果。**此项为对附录 A HTTP 列的显式偏离，留待复核** |
+| D17 | 附录 A 的 `tool_unavailable → 503` 与"Percept 承载状态"冲突 | **HTTP 200** + Percept `status="unavailable"` + 顶层 `warnings` 含 `tool_unavailable`；`/healthz` 报 `error`。附录 A 该行已于 v0.2.2 同步修正（不再记为偏离）。理由：本接口是批量语义，503 会丢失部分结果与"哪个工具坏了"的信息。调用方应看 `percepts[].status` 而非仅看状态码 |
 | D18 | `capabilities().prompts == ∅` 的语义 | 视为"**prompt 无关**"（geometry 类工具消费上游 Percept，忽略 prompts），不产生 `unsupported_prompt`；声明了非空集合的工具仍拒绝其余类型（S8 覆盖） |
 | D19 | §11.3 的 `ok|loading|error` 词汇表没有"未启用" | `config.tools.<name>.enabled: false` 的工具**不出现在** `/healthz`、`/v1/tools`、`/v1/info` 中（缺席即"不属于本次部署"），绝不伪装成 `ok`；`lazy`（导入成功、按需加载）仍映射为 `ok` |
 | D20 | §11.4 缓存 key 的"options 相关子集"具体指什么 | 仅纳入**影响结果**的 `masks`/`min_score`/`top_k`；`tools`/`fuse`/`timeout_ms`/`cache` 与 `context` 不纳入；缓存只作用于**首个无上游**的阶段（后续阶段依赖上游 Percept，key 无法覆盖） |
@@ -626,8 +627,22 @@ percepta/
 | `payload_too_large` | 超过 `max_body_bytes` | 413 |
 | `busy` | 队列满 | 503 |
 | `timeout` | 超过 `timeout_ms` | 504 |
-| `tool_unavailable` | 工具未加载/模型缺失 | 503（Percept.status=`unavailable`） |
+| `tool_unavailable` | 工具未加载/模型缺失 | **200**（Percept.status=`unavailable`）— 见 D17 |
 | `internal` | 未预期异常 | 500 |
+
+**关于 `tool_unavailable`（D17）**：这一行原先写「503（Percept.status=`unavailable`）」，
+自相矛盾——503 表示服务整体不可用，响应体不会是 `PerceiveResponse`，而 `Percept` 恰恰是
+`PerceiveResponse` 里的对象。v0.2.2 起明确为：
+
+- **HTTP 200**，响应体是完整的 `PerceiveResponse`；
+- 受影响工具产出的 Percept 取 `status="unavailable"`，`message` 说明原因，
+  `extras.code="tool_unavailable"`；
+- 顶层 `warnings` 含 `"tool_unavailable"`；
+- `/healthz` 中该工具为 `error`。
+
+理由：本接口天然是**批量语义**（一次请求可含多相机 × 多 prompt × 多工具）。若因其中一个工具
+不可用而返回 503，会同时丢失两样东西：其它工具已经算出的结果，以及「具体是哪个工具坏了」这一
+信息。调用方应检查 `percepts[].status` 与 `warnings`，而不是只看 HTTP 状态码。
 
 ## 附录 B：RLE 规范
 

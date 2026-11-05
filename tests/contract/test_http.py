@@ -398,3 +398,102 @@ def test_metrics_disabled_returns_404() -> None:
     config.metrics.enabled = False
     with TestClient(create_app(config)) as test_client:
         _assert_error(test_client.get("/metrics"), 404, "not_found")
+
+
+# ---------------------------------------------------------------------------
+# D17 — a missing model stays HTTP 200 (appendix A, as corrected in v0.2.2)
+# ---------------------------------------------------------------------------
+
+
+class _UnavailableTool(BaseTool):
+    """A tool that is registered and enabled but cannot run (no weights / no GPU)."""
+
+    name = "unavailable"
+    version = "0.1.0"
+    kind = "segmenter"
+
+    def capabilities(self) -> ToolCapabilities:
+        return ToolCapabilities(kind="segmenter", prompts={"text"}, masks=True, boxes=True)
+
+    def load(self, config) -> None:
+        raise RuntimeError("checkpoint not found at /models/missing.pt")
+
+    def perceive(self, ctx, prompts):  # pragma: no cover - never reached
+        return []
+
+
+def _unavailable_client() -> TestClient:
+    registry = ToolRegistry()
+    registry.register("unavailable", _UnavailableTool)
+    config = load_config(CI_CONFIG)
+    config.tools = {"unavailable": {"enabled": True}}
+    config.pipeline.default = ["unavailable"]
+    return TestClient(create_app(config, registry=registry))
+
+
+def test_missing_model_returns_http_200_not_503():
+    """D17: ``tool_unavailable`` is HTTP **200** with a Percept status, not 503.
+
+    Appendix A originally said 503, which contradicted its own annotation
+    ``Percept.status="unavailable"`` — a 503 body cannot be a ``PerceiveResponse``, and a
+    Percept only exists inside one. The spec was corrected in v0.2.2; this test is what stops
+    someone "fixing" the implementation back to 503 without revisiting the decision.
+    """
+    with _unavailable_client() as client:
+        response = client.post("/v1/perceive", json=_payload())
+    assert response.status_code == 200, response.text
+
+
+def test_missing_model_reports_unavailable_in_the_percept():
+    with _unavailable_client() as client:
+        body = client.post("/v1/perceive", json=_payload()).json()
+
+    assert body["percepts"], "a broken tool must still produce a Percept explaining why"
+    percept = body["percepts"][0]
+    assert percept["status"] == "unavailable"
+    assert percept["status"] != "not_found", "a missing model must never look like 'nothing there'"
+    assert percept["message"], "the reason must be human-readable"
+    assert percept["extras"].get("code") == "tool_unavailable"
+    assert percept["provenance"]["tool"] == "unavailable"
+
+
+def test_missing_model_adds_a_top_level_warning():
+    """A caller that does not walk the Percepts can still notice the degradation."""
+    with _unavailable_client() as client:
+        body = client.post("/v1/perceive", json=_payload()).json()
+    assert "tool_unavailable" in body["warnings"]
+
+
+def test_missing_model_is_reported_as_error_on_healthz():
+    """HTTP 200 on the request; still an operational failure on /healthz."""
+    with _unavailable_client() as client:
+        tools = {tool["name"]: tool for tool in client.get("/healthz").json()["tools"]}
+    assert tools["unavailable"]["status"] == "error"
+
+
+def test_one_broken_tool_does_not_discard_anothers_results():
+    """The whole reason for 200: a batch request must keep the part that worked.
+
+    ``fake`` succeeds and ``unavailable`` fails in the same pipeline; the response must carry
+    both, with the successful observations intact.
+    """
+    registry = ToolRegistry()
+    registry.register("unavailable", _UnavailableTool)
+    config = load_config(CI_CONFIG)
+    config.tools = {"unavailable": {"enabled": True}, "fake": {"enabled": True}}
+    config.pipeline.default = ["fake", "unavailable"]
+
+    with TestClient(create_app(config, registry=registry)) as client:
+        response = client.post("/v1/perceive", json=_payload())
+        assert response.status_code == 200
+        body = response.json()
+
+    by_status = {}
+    for percept in body["percepts"]:
+        by_status.setdefault(percept["status"], []).append(percept)
+
+    assert "ok" in by_status, "the working tool's results were discarded"
+    ok_percept = by_status["ok"][0]
+    assert ok_percept["observations"], "observations from the healthy tool are empty"
+    assert ok_percept["observations"][0]["area_px"] == 80 * 80
+    assert "unavailable" in by_status, "the broken tool was silently dropped"
