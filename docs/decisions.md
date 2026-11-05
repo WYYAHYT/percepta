@@ -397,3 +397,30 @@ old default would have reported "not ready" on a perfectly healthy server.
 Also observed: warm-up cost is **not constant** — 15 s on an idle H20 versus 45–73 s when
 another workload shares the GPU. The timeout therefore has to be generous, and
 ``/healthz.warmup.duration_ms`` exists so operators can see the real number rather than guess.
+
+## D31 — Introspection reads metadata from the tool class, not the instance
+
+*Context:* `/healthz` and `/v1/tools` carried their own ``entry_version`` helper that returned
+the literal ``0.0.0`` whenever ``entry.instance is None``, while the CLI went through the
+registry and showed the real version. The same deployment therefore reported *different*
+versions depending on which surface you asked — and a tool that is registered but not loaded
+(no GPU, no weights) looked like a broken plugin rather than a known one.
+
+*Decision:* ``version`` and ``kind`` are class attributes, so ``ToolEntry.describe()`` reads
+them without instantiating anything, and it is the single source of truth for `/healthz`,
+`/v1/tools` and `percepta tools list`. The duplicate helper in ``service/routes.py`` was
+deleted. ``describe()`` returns ``{name, version, status, kind, loaded}``.
+
+## D32 — An empty `cuda_visible_devices` means inherit, not "hide every GPU"
+
+*Context:* this host has 8 H20s shared with other workloads and no permanently free card, so
+pinning an index in the config made the worker's speed depend on whatever else landed there
+(warm-up measured at 15 s on a quiet card versus 45–73 s when shared). Leaving the value blank
+to mean "auto-select" then exposed a real bug: the backend did
+``if cuda_visible_devices is not None: env["CUDA_VISIBLE_DEVICES"] = ...``, and
+``CUDA_VISIBLE_DEVICES=""`` means **hide every GPU** to CUDA — a worker that cannot see any
+device at all.
+
+*Decision:* empty and whitespace-only mean "inherit the parent environment"; an explicit value
+is stripped and exported; unset inherits. The rule lives in ``SubprocessBackend._worker_env()``
+so it can be tested directly rather than by asserting an attribute.

@@ -18,6 +18,7 @@ guessing.
 
 Spec: [`percepta-SPEC.md`](percepta-SPEC.md) (mirror at [`docs/spec.md`](docs/spec.md)).
 Decisions taken where the spec was ambiguous: [`docs/decisions.md`](docs/decisions.md).
+Release history: [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Quickstart (no GPU, no weights)
 

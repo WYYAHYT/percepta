@@ -565,6 +565,7 @@ percepta/
 | v0.1.2 | 2026-11-04 | 补充 D13–D21：验证结果状态优先级、geometry 工具与 `fused` 去重、visual-hull 横截面、`tool_unavailable` 的 HTTP 200 取向（偏离附录 A，待复核）、prompt 无关工具、健康检查隐藏未启用工具、缓存 key 的 options 子集 |
 | v0.1.3 | 2026-11-05 | 补充 D22–D26：改用 uv 管理依赖、修正 torch/sam3/numpy 版本约束、**模型隔离后端抽象**（`inprocess`/`subprocess`/`http`，不用容器）、二进制分帧协议、包导入开销约束。新增 `docs/model-isolation.md` 与 `src/percepta/backends/` |
 | v0.1.4 | 2026-11-05 | 补充 D27：明确库与模型依赖/资产的边界 —— **不维护模型依赖清单**（删除 `requirements/`、`docker/`），但**强制约束权重资产**（`checkpoint` / `checkpoint_sha256` / `verify_weights`，新增 `percepta models check`）。同时删除 §13 中未交付的 `tests/golden/` 与 `examples/` |
+| v0.2.0 | 2026-11-05 | 补充 D28–D32：**真实 SAM3 端到端验证通过**（S9 关闭，实测记录见 `docs/model-isolation.md` §10）、启动预热、`wait_until_ready` 等待热态、introspection 统一读类属性、空 `cuda_visible_devices` 语义修正。包版本升至 0.2.0，新增 `CHANGELOG.md` |
 
 ---
 
