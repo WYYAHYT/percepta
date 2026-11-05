@@ -6,20 +6,35 @@ took where the spec is ambiguous (spec §19).
 
 ## 1. Current state
 
-M0 (skeleton) is **done and green**:
+M0–M5 are **done and green** under `uv`.
 
 ```bash
-python3 -m pytest -q          # 103 passing, no GPU/network/weights
-python3 -m ruff check .       # clean
+uv sync                              # creates .venv (Python 3.10) from uv.lock
+uv run pytest -q                     # 277 passing, 2 skipped (gpu), no GPU/network/weights
+uv run ruff check .                  # clean
+uv run python scripts/e2e_smoke.py   # real uvicorn; HTTP and in-process agree
 ```
 
-Already installed on this host: `pydantic>=2`, `numpy`, `pillow`, `pyyaml`, `fastapi`,
-`uvicorn`, `pytest`, `httpx`, `ruff`, and `percepta` itself (editable, `--user`).
-`torch` / `sam3` are **not** installed and must never be required by default.
+**Dependencies are managed by `uv`.** `uv.lock` is committed and generated against the
+official PyPI index, so it resolves anywhere; `.python-version` pins Python 3.10.
+`torch` / `sam3` live behind the `sam3` extra and are **never** part of a default sync
+(spec §13). `uv sync` installs the `dev` group by default, so a fresh clone can run the
+test suite immediately; `uv sync --no-dev` gives a minimal runtime environment.
+
+```bash
+uv sync --extra service    # + fastapi/uvicorn (also in dev, so usually unnecessary)
+uv sync --extra sam3       # + torch>=2.7, sam3==0.1.4  (multi-GB, GPU machine only)
+```
+
+Local network note for *this* host: PyPI official takes ~23 s per request through the
+`127.0.0.1:8118` proxy while aliyun takes 0.15 s. For interactive installs set
+`UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple` in the shell, but **do not
+regenerate `uv.lock` under a mirror** — it bakes mirror URLs into every download entry and
+breaks machines that cannot reach that mirror. If you must re-lock, do it against
+`https://pypi.org/simple` (through the proxy).
 
 If you need another package, stop and ask the Lead: spec §16.3 forbids new default
-dependencies. Use the Tsinghua mirror if you must install something for local checking:
-`pip3 install --user -i https://pypi.tuna.tsinghua.edu.cn/simple <pkg>`.
+dependencies. Add it to the right extra, then `uv lock`.
 
 ## 2. File ownership (hard boundaries, one owner per file)
 

@@ -13,19 +13,28 @@ authors = [{ name = "percepta authors" }]
 keywords = ["robotics", "perception", "segmentation", "agent"]
 classifiers = [
   "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
   "License :: OSI Approved :: Apache Software License",
 ]
 dependencies = [
   "pydantic>=2",
-  "numpy",
-  "pillow",
-  "pyyaml",
+  "numpy>=1.26,<2.4",
+  "pillow>=10",
+  "pyyaml>=6",
 ]
 
 [project.optional-dependencies]
+# Serving over HTTP. Kept out of the default install so the core stays light.
 service = ["fastapi>=0.110", "uvicorn>=0.27"]
-sam3 = ["torch>=2.1", "sam3"]
-dev = ["pytest>=7", "httpx>=0.25", "ruff>=0.4"]
+
+# Heavy, GPU-only. Never installed by `uv sync` unless the group is requested with
+# --extra, and never a default dependency (spec §13: torch must not be required).
+# Versions are pinned deliberately:
+#   * torch>=2.7 — the floor stated by sam3 0.1.4 (it is NOT compatible with 2.1);
+#   * sam3==0.1.4 — its constructor/processor API still moves between 0.1.x releases,
+#     so an unpinned range is a guaranteed breakage on the next release.
+sam3 = ["torch>=2.7,<3", "sam3==0.1.4"]
 
 [project.scripts]
 percepta = "percepta.cli:main"
@@ -35,8 +44,31 @@ fake = "percepta.tools.fake:FakeTool"
 sam3 = "percepta.tools.sam3:Sam3Tool"
 multi_view_3d = "percepta.tools.multi_view_3d:MultiView3DTool"
 
+[dependency-groups]
+# PEP 735 groups. `uv sync` installs `dev` by default, so a fresh clone can run the
+# test suite immediately; `--no-dev` gives a minimal runtime environment.
+#
+# `fastapi`/`uvicorn` are listed here as well as in the `service` extra on purpose: the
+# contract test suite imports the ASGI app, so a dev environment without them cannot even
+# collect `tests/contract`. Duplicating two small packages beats a `uv sync` that installs
+# successfully but then fails 26 tests with ModuleNotFoundError.
+dev = [
+  "pytest>=7",
+  "httpx>=0.25",
+  "ruff>=0.4",
+  "fastapi>=0.110",
+  "uvicorn>=0.27",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/percepta"]
+
+[tool.uv]
+# The project is an application/library hybrid: `uv sync` should install the package
+# itself in editable mode so `percepta` and the `percepta.tools` entry points resolve.
+package = true
+# Fail fast on resolution problems rather than silently backtracking for minutes.
+resolution = "highest"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

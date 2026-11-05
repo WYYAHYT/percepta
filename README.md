@@ -21,17 +21,24 @@ Decisions taken where the spec was ambiguous: [`docs/decisions.md`](docs/decisio
 
 ## Quickstart (no GPU, no weights)
 
+Dependencies are managed with [`uv`](https://docs.astral.sh/uv/). `uv.lock` is committed and
+pins Python 3.10 plus every transitive dependency, so the environment is reproducible.
+
 ```bash
-python3 -m pip install -e .            # core: pydantic, numpy, pillow, pyyaml
-python3 -m pip install -e ".[service]" # + fastapi, uvicorn
-python3 -m pytest -q                   # full contract suite, GPU tests skipped
+uv sync                  # creates .venv from uv.lock (includes the dev group)
+uv run pytest -q         # full contract suite, GPU tests skipped
+uv run ruff check .
 
 # serve with the synthetic segmenter
-percepta serve --config configs/ci.yaml
+uv run percepta serve --config configs/ci.yaml
 
 # or call it
-percepta perceive --image cam_head=scene.png --prompt text:red\ block --json
+uv run percepta perceive --image cam_head=scene.png --prompt text:red\ block --json
 ```
+
+`uv sync --no-dev` gives a minimal runtime environment (no pytest/httpx/ruff).
+Prefer pip? `pip install -e ".[service]"` still works — `pyproject.toml` stays
+PEP 621 compliant — but `uv` is the supported path.
 
 Python:
 
