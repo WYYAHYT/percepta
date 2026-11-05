@@ -200,7 +200,7 @@ class SubprocessBackend:
     def segment(self, prompt: Prompt) -> tuple[np.ndarray, np.ndarray | None, np.ndarray]:
         """Run one prompt. Requires a successful :meth:`set_image` first."""
         with self._lock:
-            self._ensure_running()
+            self._ensure_running(for_segment=True)
             payload = self._request(
                 RequestFrame(prompt_json=prompt.model_dump_json(), image=None)
             )
@@ -222,8 +222,25 @@ class SubprocessBackend:
             return BackendRequestError(message)
         return BackendUnavailable(message)
 
-    def _ensure_running(self) -> None:
-        if self._process is None or self._process.poll() is not None:
+    def _ensure_running(self, *, for_segment: bool = False) -> None:
+        """Start the worker if it is not running.
+
+        ``for_segment`` makes a crash visible instead of silently papering over it. Without
+        this, a worker killed mid-request would be respawned by the *next* ``segment`` call and
+        the model would fail with ``"set_image() must be called before segment()"`` — which
+        points at the caller's code while the real cause is a dead process. Reporting
+        ``unavailable`` is both truthful and what spec §16.4 requires.
+        """
+        dead = self._process is not None and self._process.poll() is not None
+        if dead and for_segment:
+            code = self._process.poll() if self._process is not None else None
+            detail = self._stderr_tail_tail()
+            self.close()
+            raise BackendUnavailable(
+                f"model worker exited while idle (exit code {code})"
+                + (f": {detail}" if detail else "")
+            )
+        if self._process is None or dead:
             self._spawn()
 
     def close(self) -> None:

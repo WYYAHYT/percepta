@@ -261,3 +261,131 @@ worker 启动时由主进程注入 `CUDA_VISIBLE_DEVICES`。好处：
    但需要重新设计帧格式，v0.2 再考虑。
 4. **worker 的健康监控**：主进程如何发现 worker 卡死（而非崩溃）？需要心跳或超时。
    当前依赖请求级超时（spec §6），可能不够。
+
+---
+
+## 10. 真实 SAM3 实测记录（v0.1，本机 H20）
+
+这一节记录**真正把 SAM3 跑起来**之后才知道的事。前面几节是设计，这一节是事实。
+
+### 10.1 环境实测
+
+```bash
+uv venv .venvs/sam3 -p 3.10
+uv pip install --python .venvs/sam3/bin/python \
+  --extra-index-url https://download.pytorch.org/whl/cu128 \
+  --index-url https://mirrors.aliyun.com/pypi/simple \
+  --index-strategy unsafe-best-match \
+  "torch==2.10.0+cu128" "sam3==0.1.4" pydantic
+```
+
+**必须放在一条命令里**，且 `--index-strategy unsafe-best-match` 不可省。原因：`sam3` 依赖 `timm`，
+而 `timm` 只写了裸 `torch`（无版本约束）。分两条命令装时，第二条会把 cu128 版覆盖成
+PyPI 的 CPU 版，并拖入一整套 **cu13** 库（与 cu128 不兼容）。
+
+实测结果：py3.10 可用 `torch 2.10.0+cu128` + `torchvision 0.25.0+cu128`，8 张 H20 可见。
+
+### 10.2 sam3 包的依赖声明不完整
+
+`sam3==0.1.4` 的 METADATA **缺少 `psutil`**，但 `sam3/model/sam3_video_predictor.py`
+顶层就 `import psutil`。所以 `import sam3` 会直接失败。
+
+补一个包即可：
+
+```bash
+uv pip install --python .venvs/sam3/bin/python psutil
+```
+
+（其余 import 如 `cv2`/`scipy`/`numba`/`hydra` 都在 eval/train 路径，图片推理不需要。）
+
+### 10.3 三个 API 陷阱（静态阅读源码 + 实测确认）
+
+| 陷阱 | 正确用法 | 错误后果 |
+|---|---|---|
+| `build_sam3_image_model` 首参 | 是 `bpe_path`，**不是** `device` | 位置传参会把设备名当词表路径 |
+| `Sam3Processor(...)` | `model` 是**必填**首参 | 只传 `resolution=` 直接 TypeError |
+| `add_geometric_prompt` | 签名 `(box, label, state)`，`label` 必填 | 缺参数报错 |
+
+实测签名（`inspect.signature`）：
+
+```
+build_sam3_image_model(bpe_path=None, device='cuda', eval_mode=True,
+                       checkpoint_path=None, load_from_HF=True,
+                       enable_segmentation=True, enable_inst_interactivity=False,
+                       compile=False)
+Sam3Processor(model, resolution=1008, device='cuda', confidence_threshold=0.5)
+```
+
+### 10.4 BPE 词表：wheel 里没有
+
+`build_sam3_image_model()` 默认去 `../assets/bpe_simple_vocab_16e6.txt.gz` 找词表，
+但 **PyPI wheel 不含 `assets/` 目录**（145 个文件里没有）。
+
+官方文件在 GitHub 的 **`sam3/assets/`** 子目录（注意不是仓库根的 `assets/`）：
+
+```bash
+curl -L -o checkpoints/bpe_simple_vocab_16e6.txt.gz \
+  https://raw.githubusercontent.com/facebookresearch/sam3/main/sam3/assets/bpe_simple_vocab_16e6.txt.gz
+```
+
+1.3 MB，262,145 行，标准 CLIP BPE 词表。通过 `tools.sam3.bpe_path` 注入。
+
+### 10.5 最隐蔽的陷阱：HWC vs CHW
+
+**这是最难发现的一个。** `Sam3Processor.set_image()` 内部：
+
+```python
+elif isinstance(image, (torch.Tensor, np.ndarray)):
+    height, width = image.shape[-2:]          # 记下 H, W
+image = v2.functional.to_image(image)         # 但 to_image 要的是 CHW！
+```
+
+传 HWC numpy `(480, 640, 3)` 时，`to_image` 把它读成 `(C=480, H=640, W=3)`。
+**不报错**，但输出 mask 形状变成 `(0, 1, 640, 3)`，**所有 prompt 都返回 0 个实例**。
+
+症状是"模型跑得很正常，就是什么都找不到" —— 极易被误判成"模型不支持这个物体"。
+
+**解法：传 PIL 图像**（无歧义）。`_Sam3Backend.set_image` 已做此转换。
+
+### 10.6 BFloat16 无法直接转 numpy
+
+SAM3 在 bf16 autocast 下推理，`boxes`/`scores` 是 bfloat16：
+
+```python
+TypeError: Got unsupported ScalarType BFloat16
+```
+
+numpy 没有 bf16 dtype，必须先 `.float()` 再 `.numpy()`。已封装为 `_to_numpy()`。
+
+### 10.7 实测性能（H20，resolution=1008）
+
+| 阶段 | 耗时 |
+|---|---|
+| worker 启动 + 模型加载 + 首帧 | **20.3 s**（一次性） |
+| 单 prompt 推理 | **253–520 ms** |
+| 同一帧第二个 prompt | **127 ms**（复用 backbone） |
+| 跨进程传输开销 | 毫秒级，可忽略 |
+
+真实照片（sklearn `flower.jpg`, 640×427）结果：
+
+```
+'flower'  -> 4 实例，top score 0.973，area 58717px，box [168.9, 84.9, 445.8, 359.3]
+'blossom' -> 3 实例，top score 0.961
+```
+
+两个近义 prompt 识别出同一批物体、分数接近，说明推理稳定。
+
+### 10.8 一条重要的测试教训
+
+**合成图会骗人。** 最初用手绘的"瓶子"色块图测试，所有 prompt 返回 0 实例，
+我一度怀疑是解析 bug。换真实照片立刻正常。
+
+SAM3 是在真实照片上训练的开放词表模型，**平面矢量图里它找不到东西是正确行为**。
+因此 `tests/gpu/test_sam3.py` 强制要求 `PERCEPTA_SAM3_PHOTO` 指向真实照片，
+否则 skip —— 用合成的图"通过"测试会给出虚假的信心。
+
+### 10.9 重复推理前必须 set_image
+
+worker 崩溃后若被静默重启，新进程没有图像状态，会报
+`set_image() must be called before segment()` —— 把矛头指向调用方代码。
+已改为：`segment()` 检测到 worker 已死时直接抛 `BackendUnavailable`（spec §16.4）。

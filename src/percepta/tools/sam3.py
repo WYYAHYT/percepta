@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from PIL import Image as PILImage
 
 from ..backends import BackendRequestError, BackendUnavailable, resolve_backend_kind
 from ..backends.http_backend import HttpBackend
@@ -55,6 +56,24 @@ class Sam3BackendError(RuntimeError):
 
 
 
+def _to_numpy(value: Any) -> np.ndarray:
+    """Convert a torch tensor (or anything array-like) to numpy, coping with bf16.
+
+    ``Tensor.numpy()`` raises ``TypeError: Got unsupported ScalarType BFloat16`` — SAM3 runs in
+    bf16 autocast, so its ``boxes``/``scores`` come back as bfloat16. There is no numpy bf16
+    dtype, so we upcast to float32 first. Bool masks pass through unchanged.
+    """
+    if value is None:
+        return np.zeros(0, dtype=np.float32)
+    if hasattr(value, "detach"):
+        tensor = value.detach().cpu()
+        # bfloat16 has no numpy dtype; upcast before converting.
+        if str(tensor.dtype) == "torch.bfloat16":
+            tensor = tensor.float()
+        return tensor.numpy()
+    return np.asarray(value)
+
+
 class _Sam3Backend:
     """Real in-process adapter: heavy imports happen in ``__init__`` only (called from ``load()``).
 
@@ -72,10 +91,19 @@ class _Sam3Backend:
         resolution: int,
         checkpoint_sha256: str | None = None,
         verify_weights: str = "if-declared",
+        bpe_path: str | Path | None = None,
+        confidence_threshold: float = 0.5,
     ) -> None:
         try:
             import sam3  # noqa: PLC0415
             import torch  # noqa: PLC0415 - deliberately lazy (spec §16.2)
+
+            # ``sam3/__init__.py`` re-exports only ``build_sam3_image_model``; the processor
+            # lives in a submodule. Importing it lazily keeps this module import-safe while
+            # still failing with a clear message when the package is absent.
+            from sam3.model.sam3_image_processor import (  # noqa: PLC0415
+                Sam3Processor,
+            )
         except Exception as exc:  # noqa: BLE001 - any import failure means "unavailable"
             raise ToolUnavailable(
                 "sam3 is not importable; install the 'sam3' extra and provide a checkpoint "
@@ -108,22 +136,58 @@ class _Sam3Backend:
         self.weights_verified = spec.verified
         self._weights_spec = spec
 
+        # NOTE on the upstream API (verified against sam3 0.1.4 source, not just the docs):
+        #   build_sam3_image_model(bpe_path=None, device=..., eval_mode=True,
+        #                          checkpoint_path=None, load_from_HF=True,
+        #                          enable_segmentation=True,
+        #                          enable_inst_interactivity=False, compile=False)
+        # The first positional argument is ``bpe_path``, NOT ``device`` — passing positionally
+        # silently treated the device string as a tokenizer path. All of these are keyword.
         self.model = sam3.build_sam3_image_model(
-            device,
-            str(spec.path),
+            bpe_path=bpe_path,
+            device=device,
+            eval_mode=True,
+            checkpoint_path=str(spec.path),
             load_from_HF=False,
+            enable_segmentation=True,
             enable_inst_interactivity=True,
         )
-        self.processor = sam3.Sam3Processor(resolution=self.resolution)
+        # ``Sam3Processor.__init__(self, model, resolution=1008, device="cuda",
+        # confidence_threshold=0.5)`` — ``model`` is required and positional.
+        self.processor = Sam3Processor(
+            self.model,
+            resolution=self.resolution,
+            device=device,
+            confidence_threshold=float(confidence_threshold),
+        )
         self._state: Any = None
         self._supports_geometric = True
 
     # -- inference -------------------------------------------------------
 
-    def set_image(self, image_rgb: np.ndarray) -> None:
+    def set_image(self, image_rgb: np.ndarray, depth: np.ndarray | None = None) -> None:
+        """Prepare a frame. ``depth`` is accepted for protocol conformance and ignored:
+        SAM3 is RGB-only (declared in ``capabilities().depth = False``).
+
+        Input format is a real trap. ``Sam3Processor.set_image`` feeds its argument to
+        ``torchvision.transforms.v2.functional.to_image``, which expects a **CHW** tensor or a
+        PIL image. Given a plain HWC numpy array it does not complain — it reads
+        ``shape[-2:]`` as ``(H, W)`` for bookkeeping while ``to_image`` treats the axes as
+        ``(C, H, W)``. The result is silent nonsense: a ``(480, 640, 3)`` frame becomes
+        C=480, H=640, W=3, and every prompt returns zero instances.
+
+        We therefore hand over a PIL image, which is unambiguous.
+        """
+        _ = depth
         torch = self._torch
+        image = np.asarray(image_rgb)
+        if image.ndim != 3 or image.shape[2] != 3:
+            raise Sam3BackendError(
+                f"expected RGB image (H, W, 3), got shape {image.shape}"
+            )
+        pil = PILImage.fromarray(image.astype(np.uint8, copy=False), mode="RGB")
         with torch.inference_mode():
-            self._state = self.processor.set_image(image_rgb)
+            self._state = self.processor.set_image(pil)
 
     def segment(
         self, prompt: Prompt
@@ -135,15 +199,21 @@ class _Sam3Backend:
 
         with torch.inference_mode():
             if prompt.type == "text":
+                # Verified signature: set_text_prompt(self, prompt: str, state: Dict)
                 self._state = self.processor.set_text_prompt(
-                    state=self._state, prompt=prompt.text
+                    prompt=prompt.text, state=self._state
                 )
             elif prompt.type == "box":
                 if not self._supports_geometric:
                     raise Sam3BackendError(NO_GEOMETRIC_PROMPT)
                 try:
+                    # Verified signature: add_geometric_prompt(self, box: List, label: bool,
+                    # state: Dict) — ``label`` is REQUIRED and means positive/negative
+                    # example, which is exactly Prompt.label's meaning (spec §3.2).
                     self._state = self.processor.add_geometric_prompt(
-                        state=self._state, box=[float(v) for v in (prompt.box or [])]
+                        box=[float(v) for v in (prompt.box or [])],
+                        label=bool(prompt.label),
+                        state=self._state,
                     )
                 except (AttributeError, TypeError) as exc:
                     self._supports_geometric = False
@@ -157,21 +227,11 @@ class _Sam3Backend:
             if masks is None:
                 raise Sam3BackendError("sam3 returned no masks")
 
-            mask_array = masks.detach().cpu().numpy() if hasattr(masks, "detach") else np.asarray(masks)
+            mask_array = _to_numpy(masks)
             if mask_array.ndim == 4:
                 mask_array = mask_array[:, 0]
-            score_array = (
-                scores.detach().cpu().numpy().reshape(-1)
-                if hasattr(scores, "detach")
-                else np.asarray(scores if scores is not None else np.zeros(len(mask_array))).reshape(-1)
-            )
-            box_array = None
-            if boxes is not None:
-                box_array = (
-                    boxes.detach().cpu().numpy()
-                    if hasattr(boxes, "detach")
-                    else np.asarray(boxes)
-                ).reshape(-1, 4)
+            score_array = _to_numpy(scores).reshape(-1)
+            box_array = None if boxes is None else _to_numpy(boxes).reshape(-1, 4)
         return mask_array.astype(bool), box_array, score_array.astype(float)
 
     def close(self) -> None:
@@ -224,6 +284,23 @@ class Sam3Tool(BaseTool):
             return
 
         kind = resolve_backend_kind(config)
+
+        # Resolve weights in the PARENT for every backend: a subprocess/http worker keeps the
+        # model in another process, so this is the only place the parent can record (and
+        # optionally verify) the exact bytes behind a result.
+        if kind != "inprocess" and config.get("checkpoint"):
+            try:
+                spec = resolve_weights(
+                    config.get("checkpoint"),
+                    expected_sha256=config.get("checkpoint_sha256"),
+                    verify=str(config.get("verify_weights", "if-declared")),
+                    what="sam3 checkpoint",
+                )
+                self._resolved_checkpoint = str(spec.path or spec.location)
+                self._resolved_model_sha256 = spec.observed_sha256
+            except WeightError as exc:
+                raise ToolUnavailable(str(exc)) from exc
+
         if kind == "inprocess":
             checkpoint = config.get("checkpoint")
             if not checkpoint:
@@ -237,6 +314,13 @@ class Sam3Tool(BaseTool):
                 resolution=int(config.get("resolution", 1008)),
                 checkpoint_sha256=config.get("checkpoint_sha256"),
                 verify_weights=str(config.get("verify_weights", "if-declared")),
+                # The PyPI wheel ships no tokenizer vocab; build_sam3_image_model() looks for
+                # ../assets/bpe_simple_vocab_16e6.txt.gz and fails if it is absent. Point it at
+                # a real file (e.g. the vocab.json/merges.txt pair from the HF repo).
+                bpe_path=config.get("bpe_path"),
+                confidence_threshold=float(
+                    config.get("confidence_threshold", config.get("min_score", 0.5))
+                ),
             )
         elif kind == "subprocess":
             self._backend = SubprocessBackend(
@@ -251,6 +335,12 @@ class Sam3Tool(BaseTool):
                         "checkpoint": config.get("checkpoint"),
                         "device": config.get("device") or "cuda",
                         "resolution": int(config.get("resolution", 1008)),
+                        "checkpoint_sha256": config.get("checkpoint_sha256"),
+                        "verify_weights": str(config.get("verify_weights", "if-declared")),
+                        "bpe_path": config.get("bpe_path"),
+                        "confidence_threshold": float(
+                            config.get("confidence_threshold", config.get("min_score", 0.5))
+                        ),
                     },
                 },
                 timeout_s=float(config.get("timeout_s", 120.0)),
@@ -304,8 +394,20 @@ class Sam3Tool(BaseTool):
 
     def _model_meta(self) -> tuple[str | None, str | None]:
         backend = self._backend
-        model = getattr(backend, "checkpoint", None) or self.config.get("checkpoint")
-        sha = getattr(backend, "model_sha256", None) or self.config.get("model_sha256")
+        model = (
+            getattr(backend, "checkpoint", None)
+            or self.config.get("checkpoint")
+            or getattr(self, "_resolved_checkpoint", None)
+        )
+        # A subprocess/http backend keeps the model in *another* process, so its
+        # ``model_sha256`` is not visible here. The parent resolved the hash itself at load
+        # time (``_resolved_model_sha256``), which is what provenance must report — otherwise
+        # a remote worker's results would carry no traceable weight identity.
+        sha = (
+            getattr(backend, "model_sha256", None)
+            or self.config.get("model_sha256")
+            or getattr(self, "_resolved_model_sha256", None)
+        )
         return (
             None if model is None else str(model),
             None if sha is None else str(sha),

@@ -307,3 +307,31 @@ and `int(0)` is falsy — an `or`-chain then dropped the expected hash and skipp
 requires an explicit `is not None` and rejects a numeric-looking hash with a message telling
 the operator to quote it in YAML. A test pins both halves: mismatch fails loudly, and an
 unquoted numeric hash is rejected rather than silently ignored.
+
+## D28 — Real SAM3 verified over the subprocess backend; four upstream traps recorded
+
+*Context:* SAM3 was finally run for real (3.2 GiB checkpoint, hash
+`9999e2341ceef5e136daa386eecb55cb414446a00ac2b55eb2dfd2f7c3cf8c9e`, on an H20 via the
+`subprocess` backend in `.venvs/sam3`). This settles the question the spec left open at S9.
+
+*Decision:* the subprocess backend is **validated for real**, not just in theory. Against a
+real photo (640×427) it returned correct masks/boxes/scores at the original resolution, with
+`model_sha256` recorded in provenance. Numbers are in `docs/model-isolation.md` §10:
+20 s one-time model load, 253–520 ms per prompt, 127 ms for a second prompt on the same frame.
+
+Four upstream traps were found and are now documented (§10.2–10.6). The most dangerous is
+that `Sam3Processor.set_image` accepts HWC numpy **without complaining** while internally
+treating it as CHW — a `(480, 640, 3)` frame becomes C=480/H=640/W=3 and every prompt silently
+returns zero instances. The fix is to pass a PIL image. This is exactly the kind of defect
+that a mocked backend can never catch, which is why the "ship a fake adapter *and* run the
+real thing once" rule exists.
+
+Also fixed as a result: `percepta.tools.sam3` now resolves and records the weight hash in the
+**parent** process (a subprocess worker keeps the model elsewhere, so provenance would
+otherwise be blank), and `SubprocessBackend.segment()` raises `unavailable` when the worker
+has died instead of silently respawning it and blaming the caller for not calling
+`set_image()`.
+
+Testing note (D28.1): the GPU test **requires a real photograph** and skips without one.
+A synthetic colour-block scene is not evidence — SAM3 legitimately finds nothing in it, and
+letting that "pass" would manufacture false confidence.
