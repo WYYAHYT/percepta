@@ -86,14 +86,24 @@ class SubprocessBackend:
             return found
         raise BackendUnavailable(f"worker interpreter not found on PATH: {self.python}")
 
-    def _spawn(self) -> None:
-        python = self._resolve_python()
+    def _worker_env(self) -> dict[str, str]:
+        """Build the worker's environment. Extracted so the GPU rule is directly testable."""
         env = dict(os.environ)
         env.update(self.extra_env)
         # Respect the caller's environment unless an explicit device was configured; the
         # "one worker per GPU" rule from docs/model-isolation.md §7 is enforced here.
-        if self.cuda_visible_devices is not None:
-            env["CUDA_VISIBLE_DEVICES"] = str(self.cuda_visible_devices)
+        #
+        # NOTE: an EMPTY string is not a device list. ``CUDA_VISIBLE_DEVICES=""`` means "hide
+        # every GPU" to CUDA, so setting it would silently disable the model instead of
+        # letting it choose. Empty therefore means "inherit the parent's environment".
+        device = None if self.cuda_visible_devices is None else str(self.cuda_visible_devices).strip()
+        if device:
+            env["CUDA_VISIBLE_DEVICES"] = device
+        return env
+
+    def _spawn(self) -> None:
+        python = self._resolve_python()
+        env = self._worker_env()
         env.setdefault("PYTHONUNBUFFERED", "1")
         # The worker imports numpy from *its own* env; make sure our src/ is importable so
         # the shared protocol module can be reused when the worker is percepta's own.

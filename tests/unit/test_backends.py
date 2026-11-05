@@ -297,3 +297,52 @@ def test_src_dir_is_importable_for_worker():
     src = Path(backend._merged_pythonpath(None).split(":")[0])
     assert (src / "percepta" / "backends" / "worker.py").is_file()
     assert src.as_posix() == Path(sysconfig.get_paths()["purelib"]).as_posix() or True
+
+
+# ---------------------------------------------------------------------------
+# GPU selection
+# ---------------------------------------------------------------------------
+
+
+def test_empty_cuda_visible_devices_does_not_hide_every_gpu(monkeypatch):
+    """``CUDA_VISIBLE_DEVICES=""`` means "hide every GPU" to CUDA, not "pick one".
+
+    An operator leaving the value blank to mean "auto-select" must not end up with a worker
+    that cannot see any GPU at all, which would surface as a confusing "no CUDA device".
+    """
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    backend = SubprocessBackend(
+        python=sys.executable, module="percepta.backends.worker", cuda_visible_devices=""
+    )
+    assert "CUDA_VISIBLE_DEVICES" not in backend._worker_env()
+
+
+def test_whitespace_only_device_also_means_inherit(monkeypatch):
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    backend = SubprocessBackend(
+        python=sys.executable, module="percepta.backends.worker", cuda_visible_devices="  "
+    )
+    assert "CUDA_VISIBLE_DEVICES" not in backend._worker_env()
+
+
+def test_explicit_device_is_exported_for_the_worker(monkeypatch):
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    backend = SubprocessBackend(
+        python=sys.executable, module="percepta.backends.worker", cuda_visible_devices="3"
+    )
+    assert backend._worker_env()["CUDA_VISIBLE_DEVICES"] == "3"
+
+
+def test_device_value_is_stripped(monkeypatch):
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    backend = SubprocessBackend(
+        python=sys.executable, module="percepta.backends.worker", cuda_visible_devices=" 1,2 "
+    )
+    assert backend._worker_env()["CUDA_VISIBLE_DEVICES"] == "1,2"
+
+
+def test_unset_device_inherits_the_parent_environment(monkeypatch):
+    """When no device is configured, whatever the parent has stays untouched."""
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "5")
+    backend = SubprocessBackend(python=sys.executable, module="percepta.backends.worker")
+    assert backend._worker_env()["CUDA_VISIBLE_DEVICES"] == "5"

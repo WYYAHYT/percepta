@@ -20,8 +20,10 @@ server:
   token_env: PERCEPTA_TOKEN
 
 device:
-  # Which GPU the *service* may see. The SAM3 worker picks its own card below.
-  cuda_visible_devices: "0"
+  # Which GPUs the *service* may see. Empty string = leave CUDA_VISIBLE_DEVICES alone, so the
+  # service simply inherits the host's view. It never touches the GPU itself; the model runs
+  # in a worker (below).
+  cuda_visible_devices: ""
 
 pipeline:
   default: ["sam3", "multi_view_3d"]
@@ -34,8 +36,15 @@ tools:
     backend: subprocess
     python: .venvs/sam3/bin/python
     worker_module: percepta.backends.worker
-    # One worker per GPU: card 2 is kept free of other workloads on this host.
-    cuda_visible_devices: "2"
+    # GPU selection is deliberately NOT pinned. This host has 8 H20s shared with other
+    # workloads and no permanently free card, so hardcoding an index (e.g. "2") makes the
+    # worker's speed depend on whatever else landed there — warm-up was measured at 15 s on a
+    # quiet card versus 45–73 s when shared. Leaving it empty lets PyTorch pick the card with
+    # the most free memory (CUDA_DEVICE_ORDER=PCI_BUS_ID + default allocation).
+    #
+    # Set an explicit index (e.g. "2") when you DO have a dedicated card, or pin several
+    # workers on different indices for real parallelism (docs/model-isolation.md §7).
+    cuda_visible_devices: ""
 
     checkpoint: checkpoints/sam3.pt
     # Pin the checkpoint. A wrong or truncated file loads "successfully" and then produces
