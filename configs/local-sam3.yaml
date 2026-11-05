@@ -1,0 +1,76 @@
+# Local deployment: real SAM3 on this machine.
+#
+# Verified working end-to-end (real 3.2 GiB checkpoint, H20, subprocess backend).
+# See docs/model-isolation.md §10 for the measured timings and the API traps.
+#
+# Two ways to use this same file:
+#   percepta serve --config configs/local-sam3.yaml           # HTTP for an Agent Policy
+#   client.perceive_local(..., config=load_config(...))       # in-process, no HTTP
+#
+# Paths are relative to the repository root, so this file is safe to commit.
+
+server:
+  host: 127.0.0.1          # loopback only; put an SSH tunnel in front, never expose
+  port: 8790
+  max_body_bytes: 33554432   # 32 MiB: one 640x480 PNG is ~0.5 MiB, so this is generous
+  max_queue: 8
+  # SAM3 inference is 250-520 ms, but a cold worker pays ~20 s once. This timeout must
+  # therefore cover model load, not just inference.
+  request_timeout_ms: 180000
+  token_env: PERCEPTA_TOKEN
+
+device:
+  # Which GPU the *service* may see. The SAM3 worker picks its own card below.
+  cuda_visible_devices: "0"
+
+pipeline:
+  default: ["sam3", "multi_view_3d"]
+
+tools:
+  sam3:
+    enabled: true
+    # subprocess: torch lives in .venvs/sam3, isolated from the service's own environment.
+    # This is what lets the service stay dependency-light while the model uses CUDA.
+    backend: subprocess
+    python: .venvs/sam3/bin/python
+    worker_module: percepta.backends.worker
+    # One worker per GPU: card 2 is kept free of other workloads on this host.
+    cuda_visible_devices: "2"
+
+    checkpoint: checkpoints/sam3.pt
+    # Pin the checkpoint. A wrong or truncated file loads "successfully" and then produces
+    # quietly wrong segments, so this is the cheapest possible insurance.
+    checkpoint_sha256: "9999e2341ceef5e136daa386eecb55cb414446a00ac2b55eb2dfd2f7c3cf8c9e"
+    verify_weights: if-declared
+
+    # The PyPI wheel ships no tokenizer vocab (docs/model-isolation.md §10.4).
+    bpe_path: checkpoints/bpe_simple_vocab_16e6.txt.gz
+
+    resolution: 1008
+    confidence_threshold: 0.3   # 0.5 drops valid instances on ordinary photos
+    min_score: 0.3
+    timeout_s: 900              # generous: first call includes model load
+
+  multi_view_3d:
+    enabled: true
+    prism_step_m: 0.01
+    prism_max_height_m: 0.5
+    prism_iou_threshold: 0.5
+
+  # The synthetic segmenter stays available for smoke tests, but is not in the pipeline.
+  fake:
+    enabled: false
+
+cache:
+  # Only the first pipeline stage is cached (D20): a repeated (image, prompt, tool) is served
+  # from memory instead of re-running the model.
+  enabled: true
+  max_entries: 256
+  ttl_s: 300
+
+logging:
+  level: info
+  json: true
+
+metrics:
+  enabled: true
