@@ -260,19 +260,54 @@ class PerceptaClient:
             return list(document.get("tools") or [])
         return list(document)
 
-    def wait_until_ready(self, timeout_s: float = 10.0, interval_s: float = 0.1) -> bool:
-        """Poll ``/healthz`` until it answers; returns ``False`` on timeout instead of raising."""
+    def wait_until_ready(
+        self,
+        timeout_s: float = 120.0,
+        interval_s: float = 0.25,
+        *,
+        warm: bool = True,
+    ) -> bool:
+        """Poll ``/healthz`` until the service can serve *usefully*.
+
+        Returns ``False`` on timeout instead of raising, so a caller can decide what to do.
+
+        ``warm=True`` (default) also waits for the model warm-up to finish. This matters more
+        than it looks: ``/healthz`` answers ``ok: true`` from the moment the process listens,
+        which is deliberate (a supervisor must never see a 16 s dead window), but a request
+        arriving then pays the full cold cost — ~16 s for SAM3 versus 137 ms once warm. Waiting
+        for ``warmup.status`` to settle is therefore the difference between a caller that
+        times out and one that does not.
+
+        A warm-up that *failed* still counts as settled: the service is up and the failure is
+        reported by ``tools[].status``, so blocking forever would be wrong. Pass ``warm=False``
+        to wait only for the port.
+        """
         deadline = time.monotonic() + max(0.0, float(timeout_s))
         while True:
             try:
                 health = self.health()
-                if health.get("ok"):
+                if health.get("ok") and (not warm or self._warmup_settled(health)):
                     return True
             except PerceptaError:
+                # Not listening yet (connection refused) or a transient 5xx: keep polling.
                 pass
             if time.monotonic() >= deadline:
                 return False
             time.sleep(max(0.01, float(interval_s)))
+
+    @staticmethod
+    def _warmup_settled(health: dict[str, Any]) -> bool:
+        """True once warm-up is done with, whatever the outcome.
+
+        ``unknown`` means the server never ran a lifespan (or predates warm-up); treating it as
+        settled keeps the client compatible with both.
+        """
+        status = (health.get("warmup") or {}).get("status")
+        return status in {"ok", "error", "disabled", "unknown", None}
+
+    def warmup_state(self) -> dict[str, Any]:
+        """Current warm-up state from ``/healthz`` (``status``, ``duration_ms``, ``error``)."""
+        return dict(self.health().get("warmup") or {"status": "unknown"})
 
     # -- perception ------------------------------------------------------
 

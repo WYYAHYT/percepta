@@ -62,6 +62,26 @@ print(resp.fused.geometry.centroid if resp.fused else None)
 
 `client.perceive_local(...)` runs the same pipeline in-process, without HTTP.
 
+### Waiting for the model to be warm
+
+The first request to a real model pays a one-time cost (SAM3: ~16–70 s depending on GPU load,
+versus 137–530 ms afterwards). The service warms itself in the background at startup and
+reports progress on `/healthz`, so a client should wait for it rather than send a request into
+the cold path:
+
+```python
+client = PerceptaClient("http://127.0.0.1:8790")
+if not client.wait_until_ready(timeout_s=180):   # waits for warm-up, not just the port
+    raise SystemExit("service did not become ready")
+print(client.warmup_state())        # {'status': 'ok', 'duration_ms': 15219.6}
+
+resp = client.perceive(images={"cam_head": photo}, prompts=[Prompt(type="text", text="bottle")])
+```
+
+`wait_until_ready` returns ``True`` once warm-up has *settled*, including when it failed —
+the service is up either way, and a broken model is reported separately in
+`/healthz.tools[].status`. Pass ``warm=False`` to wait only for the port.
+
 ## Install extras
 
 | extra | brings | for |

@@ -366,3 +366,34 @@ The previous `tools.sam3.warmup` flag was removed: it ran a 32×32 all-zero fram
 exercised different kernel shapes than a real frame (so the expensive autotuning still landed
 on the first real request), forced a second full checkpoint read, and was invisible to
 operators.
+
+## D30 — `wait_until_ready` waits for warm-up, not just the port
+
+*Context:* the client already had a ``wait_until_ready`` that returned as soon as
+``/healthz`` answered ``ok: true``. With warm-up added (D29) that became actively misleading:
+``/healthz`` reports ``ok: true`` the moment the process listens — deliberately, so a
+supervisor never sees a dead window — while the model is still cold. A client calling
+``wait_until_ready`` then immediately firing a request gets the full cold cost anyway.
+
+*Decision:* ``wait_until_ready`` also waits for ``warmup.status`` to settle
+(``ok``/``error``/``disabled``; ``unknown`` covers servers that predate warm-up, keeping
+backward compatibility). ``warm=False`` restores the old port-only behaviour. A *failed*
+warm-up counts as settled: the service is up, the failure is already reported by
+``tools[].status``, and blocking forever would be wrong.
+
+Measured from a genuine cold start, real SAM3:
+
+| stage | time |
+|---|---|
+| initial ``warmup_state()`` | ``running`` |
+| ``wait_until_ready`` | blocked **39.7 s**, returned ``True`` |
+| warm-up itself | 45.6 s (GPU 2 was busy; 15 s on an idle card) |
+| first real request afterwards | **343 ms** |
+
+Without the fix that first request would have paid the 45.6 s itself. The default timeout was
+raised from 10 s to 120 s for the same reason: 10 s cannot cover a cold model load, so the
+old default would have reported "not ready" on a perfectly healthy server.
+
+Also observed: warm-up cost is **not constant** — 15 s on an idle H20 versus 45–73 s when
+another workload shares the GPU. The timeout therefore has to be generous, and
+``/healthz.warmup.duration_ms`` exists so operators can see the real number rather than guess.

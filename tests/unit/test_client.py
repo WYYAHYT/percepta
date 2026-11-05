@@ -389,3 +389,101 @@ class _TrackingFactory:
         from percepta.tools.fake import FakeTool
 
         return FakeTool()
+
+
+# ---------------------------------------------------------------------------
+# wait_until_ready / warm-up awareness
+# ---------------------------------------------------------------------------
+
+
+class _StubHealthClient(PerceptaClient):
+    """Client whose ``/healthz`` returns a scripted sequence, so timing logic is testable
+    without a real server or a 16 s model load."""
+
+    def __init__(self, responses: list[dict[str, Any]]) -> None:
+        super().__init__("http://127.0.0.1:1")
+        self._responses = list(responses)
+        self.polls = 0
+
+    def health(self) -> dict[str, Any]:  # type: ignore[override]
+        self.polls += 1
+        if not self._responses:
+            return self._responses_last
+        self._responses_last = self._responses.pop(0)
+        return self._responses_last
+
+
+def test_wait_until_ready_waits_for_model_to_be_warm():
+    """``ok: true`` while warm-up is still running must NOT count as ready.
+
+    This is the whole point: /healthz answers immediately by design, but a request at that
+    moment pays the full ~16 s cold cost.
+    """
+    client = _StubHealthClient(
+        [
+            {"ok": True, "warmup": {"status": "pending"}},
+            {"ok": True, "warmup": {"status": "running"}},
+            {"ok": True, "warmup": {"status": "ok", "duration_ms": 1.0}},
+        ]
+    )
+    assert client.wait_until_ready(timeout_s=2.0, interval_s=0.01) is True
+    assert client.polls == 3
+
+
+def test_wait_until_ready_returns_true_when_warmup_failed():
+    """A failed warm-up still means "settled": the service is up, the model is not.
+    Blocking forever would be wrong — tools[].status already reports the failure."""
+    client = _StubHealthClient(
+        [{"ok": True, "warmup": {"status": "error", "error": "no weights"}}]
+    )
+    assert client.wait_until_ready(timeout_s=1.0, interval_s=0.01) is True
+
+
+def test_wait_until_ready_times_out_while_still_warming():
+    client = _StubHealthClient([{"ok": True, "warmup": {"status": "running"}}])
+    started = time.monotonic()
+    assert client.wait_until_ready(timeout_s=0.2, interval_s=0.01) is False
+    assert time.monotonic() - started >= 0.15
+
+
+def test_wait_until_ready_warm_false_ignores_warmup():
+    client = _StubHealthClient([{"ok": True, "warmup": {"status": "running"}}])
+    assert client.wait_until_ready(timeout_s=1.0, interval_s=0.01, warm=False) is True
+    assert client.polls == 1
+
+
+def test_wait_until_ready_tolerates_servers_without_warmup_field():
+    """Compatibility: an older server (or no lifespan) has no ``warmup`` key."""
+    client = _StubHealthClient([{"ok": True, "tools": []}])
+    assert client.wait_until_ready(timeout_s=1.0, interval_s=0.01) is True
+
+
+def test_wait_until_ready_keeps_polling_while_unreachable():
+    class _Refusing(PerceptaClient):
+        def __init__(self) -> None:
+            super().__init__("http://127.0.0.1:1")
+            self.polls = 0
+
+        def health(self) -> dict[str, Any]:  # type: ignore[override]
+            self.polls += 1
+            if self.polls < 3:
+                raise PerceptaError("connection refused", status_code=None)
+            return {"ok": True, "warmup": {"status": "ok"}}
+
+    client = _Refusing()
+    assert client.wait_until_ready(timeout_s=2.0, interval_s=0.01) is True
+    assert client.polls == 3
+
+
+def test_warmup_state_helper_exposes_the_raw_dict():
+    client = _StubHealthClient(
+        [{"ok": True, "warmup": {"status": "ok", "duration_ms": 15.2}}]
+    )
+    state = client.warmup_state()
+    assert state["status"] == "ok"
+    assert state["duration_ms"] == 15.2
+
+
+def test_warmup_state_defaults_when_absent():
+    client = _StubHealthClient([{"ok": True}])
+    assert client.warmup_state()["status"] == "unknown"
