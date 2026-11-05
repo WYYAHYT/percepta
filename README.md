@@ -89,7 +89,7 @@ the service is up either way, and a broken model is reported separately in
 |---|---|---|
 | *(none)* | `pydantic`, `numpy`, `pillow`, `pyyaml` | schema, masks, fake tool, SDK |
 | `service` | `fastapi`, `uvicorn` | `percepta serve` |
-| `sam3` | `torch`, `sam3` | the real segmenter (weights supplied at runtime) |
+| `sam3` | nothing — see `uv_envs/sam3/` | the real segmenter (weights supplied at runtime) |
 | `dev` | `pytest`, `httpx`, `ruff` | tests and lint |
 
 `torch` is deliberately **not** a default dependency: the contract suite must run on a
@@ -161,11 +161,11 @@ configuration choice rather than code:
 tools:
   sam3:
     backend: subprocess              # inprocess | subprocess | http
-    python: .venvs/sam3/bin/python   # this model's own virtualenv
+    python: uv_envs/sam3/.venv/bin/python   # this model's own virtualenv
     cuda_visible_devices: "0"
   depth:
     backend: subprocess
-    python: .venvs/depth/bin/python  # a different torch, a different venv
+    python: uv_envs/depth/.venv/bin/python  # a different torch, a different venv
     cuda_visible_devices: "1"
 ```
 
@@ -182,12 +182,16 @@ overhead is milliseconds. A dead or unavailable worker maps to Percept
 `status="unavailable"`, never `not_found`.
 
 Setting up an isolated model environment is the deployer's job, not the library's — you own
-the interpreter, percepta only needs to be told where to find it:
+the interpreter, percepta only needs to be told where to find it. Each model ships its own
+locked project under `uv_envs/`, so one command rebuilds it exactly:
 
 ```bash
-uv venv .venvs/sam3 -p 3.10
-uv pip install --python .venvs/sam3/bin/python torch==2.7.0 sam3==0.1.4
+uv sync --project uv_envs/sam3 --python 3.10    # -> uv_envs/sam3/.venv
 ```
+
+`uv_envs/sam3/pyproject.toml` and its `uv.lock` are committed (that is what makes the runtime
+reproducible); only the generated `.venv/` is ignored. The directory is named `uv_envs`, not
+`envs`, because "envs" reads as simulator environments in robotics.
 
 The worker needs only `numpy` + `pydantic` beyond the model's own framework — it imports
 percepta's protocol and schema, nothing heavier. Each model gets its own GPU via

@@ -85,23 +85,39 @@ tools:
 ### 5.1 每个模型一个隔离环境
 
 ```
-.venvs/                      # gitignored
-├── sam3/                    # torch>=2.7 + sam3==0.1.4
-└── depth/                   # torch==2.6 + depth-anything-v2
+uv_envs/                          # 提交：环境定义（可复现）
+├── sam3/
+│   ├── pyproject.toml            # 依赖 + CUDA 源（commit）
+│   ├── uv.lock                   # 精确锁定（commit）
+│   └── .venv/                    # 生成物（gitignored）
+└── depth/
+    ├── pyproject.toml
+    ├── uv.lock
+    └── .venv/
 ```
+
+**为什么目录叫 `uv_envs` 而不是 `envs`**：在机器人语境下 "envs" 很容易被理解为仿真环境
+（simulator environments），与 Python 虚拟环境混淆。`uv_envs` 消除了这个歧义。
+
+**为什么环境定义要进版本库**：模型运行时的可复现性和库本身同等重要。锁文件在库外，
+但必须和库一起被评审、被回滚。`pyproject.toml` + `uv.lock` 提交，`.venv/` 忽略。
 
 创建方式：
 
 ```bash
-# 部署方自己决定装什么 —— 这本库不提供、也不维护模型的依赖清单
-uv venv .venvs/sam3 -p 3.10
-uv pip install --python .venvs/sam3/bin/python torch==2.7.0 sam3==0.1.4
+# 一条命令从锁文件重建整个模型环境（约 7 GB，首次下载 CUDA 库较慢）
+uv sync --project uv_envs/sam3 --python 3.10
+# 产物：uv_envs/sam3/.venv/，配置里指向 uv_envs/sam3/.venv/bin/python
 ```
 
 ### 5.2 库的边界：不管模型依赖
 
-**本库不管理任何模型框架的依赖。** 没有 `requirements/depth.txt` 之类的文件，
-也没有"深度模型需要装什么"的答案，这些属于部署方。
+**本库不管理任何模型框架的依赖。** 根 `pyproject.toml` 里**没有** `sam3` 之类的 extra ——
+它曾经有过，但那样构造出来必然是坏的：从 PyPI 解析 `torch` 得到的是 CPU 版（无 `+cu128`），
+且缺少 sam3 未声明却 import 的 `psutil`。模型运行时需要自己的索引和自己的锁文件，
+因此是 `uv_envs/<model>/` 下的独立项目（决策 D33）。
+
+注意库**仍然**约束模型**权重**的路径与完整性 —— 这是两回事，见 §5.4。
 
 理由：一旦库开始维护模型依赖清单，它就得跟着每个上游模型的版本节奏走，
 必然腐化；而且不同部署的 CUDA / 驱动组合不同，库无法给出通用答案。
@@ -117,7 +133,7 @@ uv pip install --python .venvs/sam3/bin/python torch==2.7.0 sam3==0.1.4
 主环境（`.venv`）**永远只装 `pyproject.toml` 的默认依赖 + `dev` 组**，
 不含任何模型框架。这条规则保证主环境能在无 GPU 机器上安装并跑全量测试。
 
-模型依赖由部署方装进 `.venvs/<model>/.venvs` 或任意虚拟环境，
+模型依赖由部署方装进 `uv_envs/<model>/.venv`（由该目录下的 `uv.lock` 生成）或任意虚拟环境，
 然后通过 `tools.<name>.python` 指过去。
 
 ### 5.4 模型资产契约（库负责的部分）

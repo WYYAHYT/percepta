@@ -28,13 +28,16 @@ dependencies = [
 # Serving over HTTP. Kept out of the default install so the core stays light.
 service = ["fastapi>=0.110", "uvicorn>=0.27"]
 
-# Heavy, GPU-only. Never installed by `uv sync` unless the group is requested with
-# --extra, and never a default dependency (spec §13: torch must not be required).
-# Versions are pinned deliberately:
-#   * torch>=2.7 — the floor stated by sam3 0.1.4 (it is NOT compatible with 2.1);
-#   * sam3==0.1.4 — its constructor/processor API still moves between 0.1.x releases,
-#     so an unpinned range is a guaranteed breakage on the next release.
-sam3 = ["torch>=2.7,<3", "sam3==0.1.4"]
+# NOTE: there is deliberately NO `sam3` extra here.
+#
+# There used to be one, and it was broken by construction: resolving `torch` from PyPI
+# yields the CPU build (no "+cu128"), and `psutil` — which sam3 0.1.4 imports without
+# declaring — was missing, so `uv sync --extra sam3` produced an environment where
+# `import sam3` fails. It also disagreed with the environment that actually runs the model.
+#
+# A model runtime needs its own index and its own lock, so it is a separate project:
+#     uv sync --project uv_envs/sam3 --python 3.10
+# See docs/model-isolation.md §5 and decision D33.
 
 [project.scripts]
 percepta = "percepta.cli:main"

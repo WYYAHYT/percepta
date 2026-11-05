@@ -424,3 +424,29 @@ device at all.
 *Decision:* empty and whitespace-only mean "inherit the parent environment"; an explicit value
 is stripped and exported; unset inherits. The rule lives in ``SubprocessBackend._worker_env()``
 so it can be tested directly rather than by asserting an attribute.
+
+## D33 — Model runtimes are separate locked projects under `uv_envs/`, not extras
+
+*Context:* the root `pyproject.toml` carried `[project.optional-dependencies] sam3 =
+["torch>=2.7,<3", "sam3==0.1.4"]`. It was broken by construction, in three separate ways:
+
+1. resolving `torch` from PyPI yields the **CPU build** (2.14.1, no ``+cu128``), so
+   `uv sync --extra sam3` installs an environment with no GPU support;
+2. sam3 0.1.4 imports ``psutil`` at module scope without declaring it, so `import sam3` fails;
+3. it silently **disagreed** with `uv_envs/sam3/.venv` — the environment that actually runs
+   the model (torch 2.10.0+cu128) — giving two different "SAM3 environments" for one repo.
+
+The root cause is structural: a model runtime needs its own package index (PyTorch's CUDA
+wheels), its own pins, and its own lock. That cannot be expressed as an extra of the library.
+
+*Decision:* each model runtime is a standalone uv project with a committed
+`pyproject.toml` + `uv.lock` under `uv_envs/<model>/`, rebuilt with
+`uv sync --project uv_envs/<model>`. The generated `.venv/` is git-ignored; the definition is
+committed, because reproducibility of a model runtime matters as much as the library's own.
+
+The directory is named `uv_envs`, not `envs`: in a robotics codebase "envs" reads as
+simulator environments, and the ambiguity is not worth the shorter name.
+
+The root `pyproject.toml` therefore has **no** `sam3` extra. The library still constrains
+model *assets* (`checkpoint_sha256`, D27) — dependencies are the deployer's, assets are the
+library's contract.

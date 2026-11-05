@@ -1,0 +1,54 @@
+# SAM3 model environment — a separately locked deployment artifact.
+#
+# WHY THIS IS NOT AN EXTRA IN THE ROOT pyproject.toml
+# ---------------------------------------------------
+# The root `[project.optional-dependencies] sam3` was broken by construction: it resolved
+# `torch` from PyPI, which yields the CPU build (2.14.1, no "+cu128"), and it omitted
+# `psutil` — so `uv sync --extra sam3` produced an environment in which `import sam3` fails.
+# Worse, it silently disagreed with the environment that actually runs the model here.
+#
+# A model environment is not a library dependency: it needs its own index (PyTorch's CUDA
+# wheels), its own pins, and its own lock. Hence a standalone project at
+# `uv_envs/sam3/`, created with:
+#
+#     uv sync --project uv_envs/sam3 --active --python 3.10
+#
+# or simply:
+#
+#     uv sync --project uv_envs/sam3 --python 3.10
+#
+# which creates the virtualenv at `uv_envs/sam3/.venv` — point `tools.sam3.python` at
+# `uv_envs/sam3/.venv/bin/python`.
+#
+# The directory is named `uv_envs` rather than `envs` on purpose: in robotics, "envs"
+# reads as simulator environments, which this is not.
+
+[project]
+name = "percepta-sam3-env"
+version = "0.1.0"
+description = "Isolated runtime environment for the SAM3 perception model"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+  # torch needs PyTorch's CUDA index (declared below); the PyPI default build is CPU-only.
+  # 2.10.0+cu128 is what has been verified end-to-end on this host (H20, driver 570).
+  "torch==2.10.0+cu128",
+  "torchvision==0.25.0+cu128",
+  "sam3==0.1.4",
+  # Not declared by sam3 0.1.4 but imported at module level by
+  # sam3/model/sam3_video_predictor.py, so `import sam3` fails without it.
+  "psutil",
+  # The worker runs percepta's protocol and schema inside this interpreter, so it needs
+  # pydantic. It must NOT install percepta itself: the parent injects its src via PYTHONPATH.
+  "pydantic>=2",
+]
+
+[tool.uv]
+# PyTorch's own index must win for torch/torchvision; the default index serves CPU builds.
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }

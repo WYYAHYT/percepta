@@ -31,10 +31,10 @@ pipeline:
 tools:
   sam3:
     enabled: true
-    # subprocess: torch lives in .venvs/sam3, isolated from the service's own environment.
+    # subprocess: torch lives in uv_envs/sam3/.venv, isolated from the service's own environment.
     # This is what lets the service stay dependency-light while the model uses CUDA.
     backend: subprocess
-    python: .venvs/sam3/bin/python
+    python: uv_envs/sam3/.venv/bin/python
     worker_module: percepta.backends.worker
     # GPU selection is deliberately NOT pinned. This host has 8 H20s shared with other
     # workloads and no permanently free card, so hardcoding an index (e.g. "2") makes the

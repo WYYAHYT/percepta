@@ -4,7 +4,7 @@ Skipped unless a checkpoint and the isolated interpreter are both present, so th
 `pytest -m "not gpu"` run stays GPU-free.
 
     PERCEPTA_SAM3_CHECKPOINT=checkpoints/sam3.pt \
-    PERCEPTA_SAM3_PYTHON=.venvs/sam3/bin/python \
+    PERCEPTA_SAM3_PYTHON=uv_envs/sam3/.venv/bin/python \
     PERCEPTA_SAM3_BPE=checkpoints/bpe_simple_vocab_16e6.txt.gz \
     pytest -m gpu tests/gpu -q
 
@@ -30,7 +30,7 @@ from percepta.schema import Prompt, ToolContext
 pytestmark = pytest.mark.gpu
 
 CHECKPOINT = os.environ.get("PERCEPTA_SAM3_CHECKPOINT", "checkpoints/sam3.pt")
-WORKER_PYTHON = os.environ.get("PERCEPTA_SAM3_PYTHON", ".venvs/sam3/bin/python")
+WORKER_PYTHON = os.environ.get("PERCEPTA_SAM3_PYTHON", "uv_envs/sam3/.venv/bin/python")
 BPE_PATH = os.environ.get("PERCEPTA_SAM3_BPE", "checkpoints/bpe_simple_vocab_16e6.txt.gz")
 PHOTO = os.environ.get("PERCEPTA_SAM3_PHOTO", "")
 

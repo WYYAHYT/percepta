@@ -29,5 +29,9 @@ checkpoints/
 .DS_Store
 /tmp/
 
-# Per-model isolated virtualenvs (docs/model-isolation.md)
+# Per-model isolated virtualenvs (docs/model-isolation.md, D33).
+# The environment *definitions* under uv_envs/<model>/{pyproject.toml,uv.lock} ARE committed:
+# they are what makes a model runtime reproducible. Only the generated venv is ignored.
+# Named `uv_envs` rather than `envs` because "envs" reads as simulator environments here.
+uv_envs/*/.venv/
 .venvs/
