@@ -36,7 +36,7 @@ from .schema import (
     VerificationResult,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 #: Names re-exported lazily from submodules that pull optional or heavy dependencies.
 #:

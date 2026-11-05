@@ -566,6 +566,7 @@ percepta/
 | v0.1.3 | 2026-11-05 | 补充 D22–D26：改用 uv 管理依赖、修正 torch/sam3/numpy 版本约束、**模型隔离后端抽象**（`inprocess`/`subprocess`/`http`，不用容器）、二进制分帧协议、包导入开销约束。新增 `docs/model-isolation.md` 与 `src/percepta/backends/` |
 | v0.1.4 | 2026-11-05 | 补充 D27：明确库与模型依赖/资产的边界 —— **不维护模型依赖清单**（删除 `requirements/`、`docker/`），但**强制约束权重资产**（`checkpoint` / `checkpoint_sha256` / `verify_weights`，新增 `percepta models check`）。同时删除 §13 中未交付的 `tests/golden/` 与 `examples/` |
 | v0.2.0 | 2026-11-05 | 补充 D28–D32：**真实 SAM3 端到端验证通过**（S9 关闭，实测记录见 `docs/model-isolation.md` §10）、启动预热、`wait_until_ready` 等待热态、introspection 统一读类属性、空 `cuda_visible_devices` 语义修正。包版本升至 0.2.0，新增 `CHANGELOG.md` |
+| v0.2.1 | 2026-11-05 | 工程加固：模型运行时改为 `uv_envs/<model>/` 独立锁定项目（移除根 `sam3` extra，D33）、锁文件可移植性由 CI 强制检查（D34）、空 `cuda_visible_devices` 语义修正（D32）。包版本 0.2.1，新增首个 CI 工作流 |
 
 ---
 

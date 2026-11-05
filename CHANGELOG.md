@@ -6,6 +6,57 @@ changed. Every design decision referenced as `D<n>` lives in [`docs/decisions.md
 
 ---
 
+## 0.2.1 — 2026-11-05
+
+Engineering hardening after 0.2.0. No API changes; the wire format is untouched.
+
+### Changed
+
+* **Model runtimes are separate locked projects under `uv_envs/<model>/`** (D33). The root
+  `pyproject.toml`'s `sam3` extra is **gone** — it was broken by construction:
+
+  1. resolving `torch` from PyPI yields the **CPU build** (2.14.1, no `+cu128`), so
+     `uv sync --extra sam3` produced an environment with no GPU support;
+  2. sam3 0.1.4 imports `psutil` at module scope without declaring it, so `import sam3` failed;
+  3. it silently disagreed with the environment that actually runs the model
+     (torch 2.10.0+cu128) — two different "SAM3 environments" for one repository.
+
+  Each runtime now rebuilds exactly with one command:
+
+  ```bash
+  uv sync --project uv_envs/sam3 --python 3.10    # -> uv_envs/sam3/.venv
+  ```
+
+  `pyproject.toml` + `uv.lock` are committed (that is what makes the runtime reproducible);
+  only the generated `.venv/` is ignored. Named `uv_envs`, not `envs`, because "envs" reads as
+  simulator environments in a robotics codebase.
+
+  Side effect: the root lockfile dropped from 93 to **33 packages**, since the extra's CUDA
+  dependencies are no longer resolved into the library environment.
+
+* **`configs/local-sam3.yaml` no longer pins a GPU index.** This host has 8 shared H20s and no
+  permanently free card, so a hardcoded index made warm-up time depend on whatever else landed
+  there (15 s quiet versus 45–73 s shared). Fixing that exposed a real bug: an empty
+  `cuda_visible_devices` was exported verbatim, and `CUDA_VISIBLE_DEVICES=""` means *hide every
+  GPU* (D32). Empty and whitespace-only now mean "inherit".
+
+### Added
+
+* **`.github/workflows/ci.yml`** — the repository's first CI: lockfile portability check, both
+  `uv lock --check` runs, `uv sync --locked`, ruff, pytest and the end-to-end smoke test.
+* **`scripts/check_lock_portability.py`** (D34) — whitelist check on every committed `uv.lock`,
+  with 17 tests of its own. The rule "don't lock against a mirror" had been in `AGENTS.md` and
+  was violated **twice**; the root lockfile reached this release carrying **631 aliyun URLs**.
+  A rule broken twice is a rule that should not rely on memory.
+  `uv lock --check` alone cannot catch this: it validates that the lock matches
+  `pyproject.toml`, not that the URLs inside are reachable from anywhere.
+
+### Fixed
+
+* Root `uv.lock` regenerated against the official index (631 mirror URLs → 0).
+
+---
+
 ## 0.2.0 — 2026-11-05
 
 First version that runs a **real** perception model, end to end, over both entry points.
