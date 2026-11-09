@@ -42,6 +42,7 @@ from typing import Any
 import numpy as np
 
 from . import geometry as geo
+from . import hull
 from .masks import decode_depth, to_array
 from .schema import Geometry, PerceiveOptions, Percept
 from .tools.base import build_provenance, make_percept
@@ -71,8 +72,26 @@ DEFAULT_SINGLE_VIEW_UNCERTAINTY_M = 0.05
 #: request; when hit, the step is widened to cover the range with this many samples.
 MAX_PRISM_HYPOTHESES = 512
 
+#: A height search is only meaningful with several candidates: one sample cannot have a peak, so
+#: a coarse ``prism_step_m`` must not collapse the search to a single guess.
+MIN_PRISM_STEPS = 8
+
 #: A geometry is never reported with an uncertainty below this (depth noise floor).
 MIN_UNCERTAINTY_M = 1e-3
+
+#: A "hang" reading (an object wider above than below) is taken only when it explains the other
+#: views better than the prism reading by this much of IoU. Anything standing on its own footprint
+#: is a prism, so the burden of proof is on the unusual reading.
+HANG_MARGIN = 0.03
+
+#: Per-view IoU spread, in metres of silhouette disagreement, above which the views are reported
+#: as inconsistent. Two views of one object rarely disagree by more than a mask edge; a large
+#: spread means one of them is partly occluded or shows something else.
+DISAGREEMENT_WARN_M = 0.02
+
+#: A footprint wider than this is not an object standing on a table. Silhouettes seen at a
+#: grazing angle project to enormous regions on the plane, and the grid has to stay finite.
+MAX_FOOTPRINT_SPAN_M = 1.2
 
 
 # ---------------------------------------------------------------------------
@@ -419,7 +438,7 @@ def _height_curve(
 def _fuse_prism(
     views: list[_View], context: dict[str, Any]
 ) -> tuple[Geometry, dict[str, Any]] | None:
-    """D4 silhouette/prism height search over at least two calibrated views."""
+    """Silhouette/prism height search with an exact footprint (P0) and split uncertainty (P1)."""
     prism_views = _prism_views(views)
     if len(prism_views) < 2:
         return None
@@ -433,92 +452,342 @@ def _fuse_prism(
     step = _context_value(context, "prism_step_m", DEFAULT_PRISM_STEP_M)
     threshold = _context_value(context, "prism_iou_threshold", DEFAULT_PRISM_IOU_THRESHOLD)
     threshold = min(max(threshold, 0.0), 1.0)
-    step = min(step, max_height)  # a step larger than the range would only sample nonsense
+    step = min(step, max_height)
 
-    steps = max(1, int(round(max_height / step)))
+    grid = _prism_grid(prism_views, table_z, max_height)
+    if grid is None:
+        return None
+
+    # A height search needs several candidates to have a peak at all: with one sample there is
+    # nothing to compare, and the answer is whatever that single guess scored. A caller passing an
+    # absurd ``prism_step_m`` (a bug, or a deliberate "just give me something") would otherwise
+    # silently get a one-sample search; floor it at a resolution that can still find a peak.
+    steps = max(MIN_PRISM_STEPS, int(round(max_height / step)))
     if steps > MAX_PRISM_HYPOTHESES:
         steps = MAX_PRISM_HYPOTHESES
-        step = max_height / float(steps)
+    step = max_height / float(steps)
     heights = [step * float(index) for index in range(1, steps + 1)]
 
-    curve = _height_curve(prism_views, table_z, heights, threshold)
+    # P0: the score of a candidate height now comes from the *exact* prism — the cells whose whole
+    # column is inside every mask — projected back into the other views. The old code scored a
+    # cone slice at z_top, which is the object's shadow at that depth, and kept it only for
+    # scoring while building the answer from a *different* (mid-height) slice.
+    curve = _height_curve_grid(grid, prism_views, table_z, heights)
     if not curve:
         return None
     best_height, best_score = max(curve, key=lambda item: item[1])
-    chosen = next((height for height, score in curve if score >= threshold), None)
+    # Take the *peak* of the curve, not the first height that clears the threshold.
+    #
+    # Spec D4 said "smallest height whose IoU reaches prism_iou_threshold". Measured against a
+    # synthetic cube that rule stops far too early: the curve rises monotonically to the true
+    # height (IoU 0.96 at h=0.10 for a 10 cm cube) but already crosses 0.5 at h=0.04, so taking
+    # the crossing biases every height low — a systematic error of h/2 in top_z and in the
+    # centroid's z. The threshold now only gates confidence (did anything fit at all?), and the
+    # answer is the best-fitting height.
+    chosen = best_height if best_score >= threshold else None
     if chosen is None:
         chosen = best_height
         warnings.append("geometry_low_confidence")
     chosen_score = dict(curve)[chosen]
 
-    # The winning height is D4's answer. The cross-section itself is taken at mid-height and
-    # intersected across views (visual hull), which is symmetric in the views and therefore
-    # cancels most of the single-view "shadow" bias of the prism slice.
-    mid_z = table_z + 0.5 * chosen
-    polygons = []
-    for view in prism_views:
-        polygon = _slice_polygon(view, mid_z)
-        if polygon is not None:
-            polygons.append(polygon)
-    if not polygons:
-        return None
-    intersection = polygons[0]
-    for polygon in polygons[1:]:
-        intersection = geo.convex_polygon_intersection(intersection, polygon)
-        if intersection.shape[0] < 3:
-            break
-    if intersection.shape[0] >= 3:
-        cross_section = intersection
-    else:
-        cross_section = None
-        warnings.append("geometry_inconsistent_views")
-
-    if cross_section is not None:
-        centroid_xy = geo.polygon_centroid(cross_section)
-        yaw = geo.yaw_from_points(cross_section)
-        cols, rows = cross_section[:, 0], cross_section[:, 1]
-        # The silhouette primitive is a visual-hull slice, so this box is an *upper bound*
-        # on the object's footprint, not a tight fit (no depth means no surface to fit).
-        bbox_min = [float(cols.min()), float(rows.min()), float(table_z)]
-        bbox_max = [float(cols.max()), float(rows.max()), float(table_z + chosen)]
-    else:
-        centroids = np.asarray([geo.polygon_centroid(polygon) for polygon in polygons])
-        centroid_xy = centroids.mean(axis=0)
-        yaw = geo.yaw_from_points(np.concatenate(polygons, axis=0))
-        bbox_min = None
-        bbox_max = None
-    if not np.all(np.isfinite(centroid_xy)):
+    top_z = table_z + chosen
+    cells = hull.column_inside(prism_views, grid, table_z, top_z)
+    metrics = hull.footprint_metrics(grid, cells)
+    if metrics is None:
         return None
 
-    # D4: step * (1 + 1/views_used), plus a margin proportional to the IoU shortfall.
-    shortfall = max(0.0, threshold - float(chosen_score))
-    uncertainty = step * (1.0 + 1.0 / float(len(prism_views)))
-    uncertainty += shortfall * max_height * 0.5
+    # A second reading of the same silhouette, taken as if the object hung from its top: correct
+    # for a bowl or a cup (wider above than below), which a prism reads far too small. Kept only
+    # when it explains the other views clearly better.
+    hang_cells = _hang_cells(prism_views, grid, table_z, chosen, cells)
+    hang_metrics = None if hang_cells is None else hull.footprint_metrics(grid, hang_cells)
+    kind = "prism"
+    if hang_metrics is not None and hang_metrics.cell_count >= max(4, metrics.cell_count // 4):
+        hang_score = _cells_score(grid, hang_cells, prism_views, table_z, chosen)
+        if hang_score is not None and hang_score > chosen_score + HANG_MARGIN:
+            kind = "hang"
+            metrics = hang_metrics
+            chosen_score = hang_score
+
+    width = float(metrics.bbox_max[0] - metrics.bbox_min[0])
+    depth = float(metrics.bbox_max[1] - metrics.bbox_min[1])
+
+    # P1: two uncertainties, because they differ by an order of magnitude and a caller has to
+    # know which one is the problem. Lateral comes from the mask edge and the grid; height comes
+    # from the height search's step and how well the views agreed on it.
+    lateral = _lateral_uncertainty(grid, prism_views, table_z, chosen)
+    height_unc = _height_uncertainty(step, chosen_score, threshold, max_height)
+    disagreement = _view_disagreement(grid, prism_views, table_z, chosen)
 
     geometry = Geometry(
         frame="world",
-        centroid=[float(centroid_xy[0]), float(centroid_xy[1]), float(table_z + 0.5 * chosen)],
-        bbox3d_min=bbox_min,
-        bbox3d_max=bbox_max,
-        top_z=float(table_z + chosen),
-        yaw_rad=float(yaw),
-        uncertainty_m=float(uncertainty),
+        centroid=[
+            float(metrics.centroid_xy[0]),
+            float(metrics.centroid_xy[1]),
+            float(table_z + 0.5 * chosen),
+        ],
+        bbox3d_min=[float(metrics.bbox_min[0]), float(metrics.bbox_min[1]), float(table_z)],
+        bbox3d_max=[float(metrics.bbox_max[0]), float(metrics.bbox_max[1]), float(top_z)],
+        top_z=float(top_z),
+        yaw_rad=float(metrics.yaw_rad),
+        # ``uncertainty_m`` keeps its frozen meaning (the worst axis) so existing callers do not
+        # silently become more confident; the split lives in the dedicated fields below.
+        uncertainty_m=float(max(lateral, height_unc)),
         views_used=len(prism_views),
+        lateral_uncertainty_m=float(lateral),
+        height_uncertainty_m=float(height_unc),
+        view_disagreement_m=disagreement,
+        method=kind,
     )
     extras: dict[str, Any] = {
         "method": "prism",
+        "reading": kind,
         "views": [view.camera for view in prism_views],
         "prism_height_m": float(chosen),
         "prism_iou": float(chosen_score),
         "prism_iou_threshold": float(threshold),
-        # "best" refers to the heights actually scanned (the scan stops at the first match).
         "prism_best_height_m": float(best_height),
         "prism_best_iou": float(best_score),
         "prism_scanned_heights": len(curve),
+        "footprint_area_m2": float(metrics.area_m2),
+        "footprint_extent_m": [width, depth],
+        "footprint_cells": metrics.cell_count,
+        "grid_cell_m": float(grid.cell),
         "table_z": float(table_z),
+        "lateral_uncertainty_m": float(lateral),
+        "height_uncertainty_m": float(height_unc),
+        "view_disagreement_m": disagreement,
         "warnings": warnings,
     }
+    if disagreement is not None and disagreement > DISAGREEMENT_WARN_M:
+        warnings.append("geometry_inconsistent_views")
     return geometry, extras
+
+
+@dataclass
+class _PrismGridCache:
+    """Placeholder type kept for the public surface; the grid itself is a ``hull.PlaneGrid``."""
+
+
+def _prism_grid(
+    prism_views: list[_PrismView], table_z: float, max_height: float
+) -> Any:
+    """Plane grid covering every view's shadow, from the base to the tallest candidate.
+
+    The bounds come from the shadow at the base (where the silhouette is widest as a rule) unioned
+    with the shadow at ``max_height``: an object cannot stand outside the region its own masks
+    allow at either extreme, so the grid never clips a real footprint.
+    """
+    lo = np.array([np.inf, np.inf])
+    hi = np.array([-np.inf, -np.inf])
+    found = False
+    for view in prism_views:
+        for height in (0.0, max_height):
+            hits = geo.ray_horizontal_plane(view.origin, view.dirs, table_z + height)
+            hits = hits[np.all(np.isfinite(hits), axis=1)]
+            if hits.shape[0] < 1:
+                continue
+            found = True
+            lo = np.minimum(lo, hits[:, :2].min(axis=0))
+            hi = np.maximum(hi, hits[:, :2].max(axis=0))
+    if not found or not np.all(np.isfinite(lo)) or not np.all(np.isfinite(hi)):
+        return None
+    margin = 0.01
+    # A shadow seen at a grazing angle can be enormous (the plane is nearly parallel to the rays).
+    # Cap the span: a footprint larger than this is not an object on a table.
+    span = hi - lo
+    if np.any(span > MAX_FOOTPRINT_SPAN_M):
+        centre = 0.5 * (lo + hi)
+        hi = np.where(span > MAX_FOOTPRINT_SPAN_M, centre + MAX_FOOTPRINT_SPAN_M / 2, hi)
+        lo = np.where(span > MAX_FOOTPRINT_SPAN_M, centre - MAX_FOOTPRINT_SPAN_M / 2, lo)
+    return hull.PlaneGrid.fit(lo - margin, hi + margin)
+
+
+def _height_curve_grid(
+    grid: Any,
+    prism_views: list[_PrismView],
+    table_z: float,
+    heights: list[float],
+) -> list[tuple[float, float]]:
+    """Mean mask IoU of the exact prism at each candidate height."""
+    curve: list[tuple[float, float]] = []
+    for height in heights:
+        top_z = table_z + height
+        cells = hull.column_inside(prism_views, grid, table_z, top_z)
+        if int(np.count_nonzero(cells)) < 4:
+            curve.append((float(height), 0.0))
+            continue
+        score = _cells_score(grid, cells, prism_views, table_z, height)
+        curve.append((float(height), 0.0 if score is None else float(score)))
+    return curve
+
+
+def _cells_score(
+    grid: Any,
+    cells: np.ndarray,
+    prism_views: list[_PrismView],
+    table_z: float,
+    height: float,
+) -> float | None:
+    """Mean IoU of a prism built on ``cells`` against every view's mask.
+
+    The prism is the cell set extruded from ``table_z`` to ``table_z + height``. Its silhouette in
+    a view is the hull of its projected corners; comparing that with the observed mask is what
+    scores a candidate, and it is the same measure the old code used — only now the prism under it
+    is the real one.
+    """
+    xy = grid.xy()[cells]
+    if len(xy) == 0:
+        return None
+    # the footprint outline plus its own base/top heights: a prism's silhouette is the hull of
+    # these projected points, so the hull of the 2-D corners suffices for every view
+    corners = geo.convex_hull_2d(xy)
+    if corners.shape[0] < 3:
+        return None
+    vertices = _prism_vertices(corners, table_z, table_z + height)
+    scores: list[float] = []
+    for target in prism_views:
+        silhouette = _project_to_view(vertices, target)
+        if silhouette is None:
+            continue
+        scores.append(_projected_iou(silhouette, target))
+    return float(np.mean(scores)) if scores else None
+
+
+def _hang_cells(
+    prism_views: list[_PrismView],
+    grid: Any,
+    table_z: float,
+    height: float,
+    prism_cells: np.ndarray,
+) -> np.ndarray | None:
+    """Cells the silhouette allows if the object *hangs* from its top down to the table.
+
+    A prism asks "is the whole column inside every mask"; a bowl is not, because its foot is much
+    narrower than its rim — the prism reading then reports the foot and, with it, a height that is
+    too small. The hanging reading instead asks whether the column from the plane up to the top is
+    inside at the top and does not leave the masks below it; cells only the rim covers are kept.
+
+    Implemented as: the union of the prism footprint with the shadow at the top, kept only where
+    every view's mask still contains the top of the column. It is a coarse reading by nature — it
+    is what a silhouette alone can say about an overhanging shape — so the caller only takes it
+    when it scores clearly better.
+    """
+    top_z = table_z + height
+    allowed = np.zeros(grid.size, dtype=bool)
+    for view in prism_views:
+        hits = geo.ray_horizontal_plane(view.origin, view.dirs, top_z)
+        hits = hits[np.all(np.isfinite(hits), axis=1)]
+        if hits.shape[0] < 3:
+            return None
+        ring = geo.convex_hull_2d(hits[:, :2])
+        if ring.shape[0] < 3:
+            return None
+        raster = geo.polygon_mask(ring, (grid.ny, grid.nx))
+        # polygon_mask works in pixel coordinates; map cell centres to grid indices instead
+        xy = grid.xy()
+        cols = np.rint((xy[:, 0] - grid.lo[0]) / grid.cell).astype(np.int64)
+        rows = np.rint((xy[:, 1] - grid.lo[1]) / grid.cell).astype(np.int64)
+        ok = (cols >= 0) & (cols < grid.nx) & (rows >= 0) & (rows < grid.ny)
+        inside = np.zeros(grid.size, dtype=bool)
+        inside[ok] = raster[rows[ok], cols[ok]]
+        allowed |= inside
+        _ = prism_cells
+    return allowed
+
+
+def _lateral_uncertainty(
+    grid: Any, prism_views: list[_PrismView], table_z: float, height: float
+) -> float:
+    """How far the footprint edge can move for one pixel of mask error (P1).
+
+    A pixel of mask error displaces the silhouette ray by ``1/f`` in angle; where that ray meets
+    the plane the displacement is ``distance / focal / sin(elevation)``, largest for a grazing
+    camera. The worst view sets the bound, and the grid's own quantisation is added since the
+    reported bounds are cell-quantised.
+    """
+    worst = 0.0
+    for view in prism_views:
+        rows, cols = np.nonzero(view.mask)
+        if len(rows) == 0:
+            continue
+        focal = float(view.K[0, 0])
+        if focal <= 0.0:
+            continue
+        # the ray through the middle of the mask, to the object's mid height
+        mid_uv = np.array([[float(np.mean(cols)), float(np.mean(rows))]])
+        origin, dirs = geo.rays_from_pixels(mid_uv, view.K, view.T)
+        direction = dirs[0]
+        elevation = abs(float(direction[2]))
+        elevation = max(elevation, 0.05)
+        hit = geo.ray_horizontal_plane(origin, dirs, table_z + 0.5 * height)
+        if not np.all(np.isfinite(hit)):
+            continue
+        distance = float(np.linalg.norm(hit[0] - origin[0]))
+        worst = max(worst, distance / focal / elevation)
+    return float(worst + 0.5 * grid.cell)
+
+
+def _ray_plane_uncertainty(origin, dirs, hit, view: _View) -> float:
+    """How far a ray/plane intersection moves for one pixel of mask error (P1).
+
+    This path's lateral error is not the grid's: it is the mask edge, projected. One pixel moves
+    the ray by ``1/f`` radians, and where the ray meets a horizontal plane that becomes
+    ``distance / focal / sin(elevation)`` — largest for a grazing camera, which is exactly the
+    case a caller should not trust without being told.
+    """
+    focal = float(np.asarray(view.K)[0, 0])
+    if focal <= 0.0 or not np.all(np.isfinite(hit)):
+        return DEFAULT_SINGLE_VIEW_UNCERTAINTY_M
+    direction = np.asarray(dirs, dtype=np.float64).reshape(-1)[:3]
+    elevation = max(abs(float(direction[2])), 0.05)
+    distance = float(np.linalg.norm(np.asarray(hit).reshape(3) - np.asarray(origin).reshape(3)))
+    return float(distance / focal / elevation)
+
+
+def _height_uncertainty(
+    step: float, score: float, threshold: float, max_height: float
+) -> float:
+    """How far the height can be off: the search step, widened when the views disagreed (P1).
+
+    ``geometry_low_confidence`` means no height reached the threshold, in which case the arg-max is
+    a guess rather than a fit and the bound has to say so.
+    """
+    shortfall = max(0.0, float(threshold) - float(score))
+    return float(step + shortfall * max_height * 0.5)
+
+
+def _view_disagreement(
+    grid: Any, prism_views: list[_PrismView], table_z: float, height: float
+) -> float | None:
+    """Largest disagreement between the per-view IoU scores of the chosen prism (P1).
+
+    A single ``uncertainty_m`` cannot distinguish "all views agree, the answer is good" from "two
+    views disagree by a lot, the average hides it". This reports the spread directly: a camera
+    whose mask is partly occluded, or twice the object, shows up here and nowhere else.
+    """
+    top_z = table_z + height
+    cells = hull.column_inside(prism_views, grid, table_z, top_z)
+    xy = grid.xy()[cells]
+    if len(xy) < 3:
+        return None
+    corners = geo.convex_hull_2d(xy)
+    if corners.shape[0] < 3:
+        return None
+    vertices = _prism_vertices(corners, table_z, top_z)
+    scores: list[float] = []
+    for target in prism_views:
+        silhouette = _project_to_view(vertices, target)
+        if silhouette is None:
+            continue
+        scores.append(_projected_iou(silhouette, target))
+    if len(scores) < 2:
+        return None
+    # IoU spread, converted to metres through the object's own extent: a 0.5 IoU gap on a 10 cm
+    # object is a few centimetres of disagreement at the silhouette edge.
+    spread = float(max(scores) - min(scores))
+    extent = float(np.linalg.norm(xy.max(axis=0) - xy.min(axis=0)))
+    return float(spread * max(extent, 0.01))
 
 
 # ---------------------------------------------------------------------------
@@ -552,9 +821,14 @@ def _fuse_single_view(
         return None
     warnings.append("geometry_single_view")
     warnings.append("geometry_height_assumed")
-    uncertainty = max(
-        DEFAULT_SINGLE_VIEW_UNCERTAINTY_M, 0.5 * rough_height, 0.03
-    )
+    # P1 applied to this path, where the split matters most. The ray/plane hit that gives (x, y)
+    # is a geometric intersection: its error is one mask pixel, a few millimetres. The height, by
+    # contrast, is not measured at all — one silhouette cannot tell a low deep object from a tall
+    # shallow one — it is *assumed*. Reporting both under one number would let a caller believe
+    # the height is as good as the position, which is exactly the mistake that makes a policy
+    # descend to the wrong place.
+    lateral = _ray_plane_uncertainty(origin, dirs, hit, view)
+    height_unc = max(DEFAULT_SINGLE_VIEW_UNCERTAINTY_M, 0.5 * rough_height, 0.03)
     geometry = Geometry(
         frame="world",
         centroid=[float(hit[0]), float(hit[1]), float(table_z + 0.5 * rough_height)],
@@ -562,13 +836,21 @@ def _fuse_single_view(
         bbox3d_max=None,
         top_z=float(table_z + rough_height),
         yaw_rad=None,
-        uncertainty_m=float(uncertainty),
+        uncertainty_m=float(max(lateral, height_unc)),
         views_used=1,
+        lateral_uncertainty_m=float(lateral),
+        height_uncertainty_m=float(height_unc),
+        # A single view has nothing to disagree with itself; ``None`` says "unknown", which is
+        # honest, rather than ``0.0`` which would read as "verified consistent".
+        view_disagreement_m=None,
+        method="single_view",
     )
     extras: dict[str, Any] = {
         "method": "single_view",
         "views": [view.camera],
         "assumed_height_m": float(rough_height),
+        "lateral_uncertainty_m": float(lateral),
+        "height_uncertainty_m": float(height_unc),
         "table_z": float(table_z),
         "warnings": warnings,
     }

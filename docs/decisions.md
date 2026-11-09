@@ -490,3 +490,56 @@ Two details that matter:
 
 `uv lock --check` is *not* sufficient on its own: it validates that the lock matches
 `pyproject.toml`, not that the URLs inside it are reachable from anywhere. Both are now run.
+
+## D35 — The prism footprint is a column test, and the uncertainty is split in three
+
+*Context:* two defects in the no-depth path, both found by measuring against a synthetic cube with
+a known ground truth (`scripts/footprint_accuracy.py`).
+
+**The footprint was the object's shadow.** The cross-section was the cone slice at mid-height: where
+each camera's silhouette rays cross that plane. For an oblique camera that polygon is larger than
+the object by roughly ``h/2 · tan(θ)``, and intersecting several such shadows cancels only part of it
+because they disagree in different directions. Measured on a 10 cm cube: **178–293 cm² against a true
+100 cm² (1.8–2.9×)**.
+
+**One uncertainty hid two unrelated numbers.** ``uncertainty_m`` could not say whether the lateral
+position or the height was the weak one — and they differ by more than an order of magnitude: one
+mask pixel moves the footprint a few millimetres while leaving the height *guessed*.
+
+*Decision (footprint).* A plane cell belongs to the object **iff its whole vertical column** lies
+inside every mask, sampled at interior heights (0.15, 0.5, 0.85 of the column). This is the
+discrete silhouette-restricted visual hull, and for a box it is exact. Computed on a ground-plane
+grid (`src/percepta/hull.py`) rather than as a convex polygon, because a three-view hull is
+generally non-convex and any polygon representation would discard exactly the information that
+matters.
+
+*Decision (height).* The height is the **peak** of the IoU curve, not the first height that clears
+the threshold. Spec D4 asked for the smallest qualifying height, which stops far too early: on a
+10 cm cube the curve crosses 0.5 at h≈0.04 and peaks at 0.10 (IoU 0.96), so the old rule reported a
+4 cm object and dragged ``top_z`` and the centroid's z down with it. The threshold now only gates
+confidence.
+
+*Decision (uncertainty).* ``Geometry`` gains three optional fields (additive, per spec §3):
+``lateral_uncertainty_m``, ``height_uncertainty_m`` and ``view_disagreement_m``. ``uncertainty_m``
+keeps its frozen meaning (the worst axis) so no existing caller silently becomes more confident.
+``view_disagreement_m`` reports the spread between per-view fits, which neither uncertainty can
+express: the average of a good and an occluded view looks perfectly confident.
+
+Two further defects surfaced while fixing the above and are now pinned by tests:
+
+* sampling the column at fractions **0.0 and 1.0** made every column fail. A mask covers the
+  object's interior, and its base and top edges *are* the boundary — so the correct columns read
+  "outside" and a 15 cm cube collapsed to a 2 cm² footprint with a zero score.
+* a coarse ``prism_step_m`` collapsed the height search to a single sample, which cannot have a
+  peak. ``MIN_PRISM_STEPS`` floors it.
+
+Result (`scripts/footprint_accuracy.py`, cube side 10 cm):
+
+| rig | centroid err before → after | height err before → after |
+|---|---|---|
+| 0/120/240 | 1.03–1.52 cm → **0.33–1.04 cm** | 0–3 cm → **0–2 cm** |
+| 0/180 | 0.5–2.0 cm → **0.5–1.0 cm** | 1–4 cm → **1–2 cm** |
+| 0/90/180/270 | 0–1.5 cm → **0.01–1.5 cm** | 0–3 cm → **0–3 cm** |
+
+The footprint ratio moved from 1.78–2.93× to 0.65–2.18×. It is still an *upper bound* on a convex
+body — that is what a silhouette hull is — so the remaining excess is expected, not a bug.

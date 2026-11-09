@@ -6,6 +6,67 @@ changed. Every design decision referenced as `D<n>` lives in [`docs/decisions.md
 
 ---
 
+## 0.3.0 — 2026-11-09
+
+The no-depth geometry path was measuring the wrong thing. Accuracy improved by a factor of
+three in the worst rig and two silent failures were removed.
+
+### Fixed
+
+* **The prism footprint was the object's *shadow*, not its footprint** (D35). The cross-section
+  was the cone slice at mid-height — where each camera's silhouette rays cross that plane — which
+  is larger than the object by roughly ``h/2·tan(θ)``. Measured on a 10 cm cube with a known
+  ground truth: **178–293 cm² reported against a true 100 cm² (1.8–2.9×)**.
+
+  It is now the discrete silhouette-restricted visual hull: a plane cell belongs to the object iff
+  its **whole vertical column** lies inside every mask (`src/percepta/hull.py`). Computed on a
+  ground-plane grid rather than as a convex polygon, because a three-view hull is generally
+  non-convex and a polygon would discard exactly the information that matters.
+
+* **The height was systematically underestimated.** Spec D4 asked for the *smallest* height whose
+  IoU reached the threshold, which stops far too early: the curve crosses 0.5 at h≈0.04 while
+  peaking at 0.10 for a 10 cm cube. The answer is now the **peak**; the threshold only gates
+  confidence. This also removes the half-height error it injected into ``top_z`` and the
+  centroid's z.
+
+* **A 15 cm object measured 2 cm².** The column test sampled its ends (fractions 0.0 and 1.0), and
+  a mask covers the object's *interior* — the base and top edges are exactly where the interior
+  stops. Every correct column therefore read "outside" and the answer collapsed. Sampling is now
+  at interior fractions.
+
+* **A coarse `prism_step_m` collapsed the search to one sample**, which cannot have a peak.
+  ``MIN_PRISM_STEPS`` floors it.
+
+### Added
+
+* **Split uncertainty** (D35). ``Geometry`` gains ``lateral_uncertainty_m``,
+  ``height_uncertainty_m``, ``view_disagreement_m`` and ``method`` — all optional, so nothing
+  existing changes shape. ``uncertainty_m`` keeps its frozen meaning (the worst axis), so no
+  existing caller silently becomes more confident.
+
+  The distinction matters because the two numbers differ by an order of magnitude: one mask pixel
+  moves the footprint a few millimetres while leaving the height *guessed*. A caller that descends
+  onto a surface must read ``height_uncertainty_m``; a caller that only needs a lateral target can
+  read ``lateral_uncertainty_m`` and ignore the rest. ``view_disagreement_m`` is the third,
+  independent signal: the average of a good view and an occluded one looks perfectly confident, and
+  only the per-view spread reveals it.
+
+* `scripts/footprint_accuracy.py` — the measurement harness these numbers come from, kept so the
+  next change can be compared against the same ground truth.
+* 18 tests in `tests/unit/test_footprint.py`, including one per defect above.
+
+### Verified
+
+| rig | centroid error | height error |
+|---|---|---|
+| 0/120/240 | 1.03–1.52 cm → **0.33–1.04 cm** | 0–3 cm → **0–2 cm** |
+| 0/180 | 0.5–2.0 cm → **0.5–1.0 cm** | 1–4 cm → **1–2 cm** |
+| 0/90/180/270 | 0–1.5 cm → **0.01–1.5 cm** | 0–3 cm → **0–3 cm** |
+
+401 tests pass (18 new), 1 skipped; ruff clean; both lockfiles portable.
+
+---
+
 ## 0.2.2 — 2026-11-05
 
 ### Fixed

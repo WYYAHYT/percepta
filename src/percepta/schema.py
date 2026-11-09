@@ -202,6 +202,24 @@ class Observation(Frozen):
 
 
 class Geometry(Frozen):
+    """3D description of one object, in the world frame.
+
+    ``uncertainty_m`` keeps its frozen meaning: the worst axis, so a caller that reads only that
+    field cannot become more confident by accident. The fields below were added (optional,
+    additive — spec §3 allows optional additions) because a single number hides the one
+    distinction that matters for planning:
+
+    * ``lateral_uncertainty_m`` — how far the footprint edge moves for a mask-edge error. This is
+      the horizontal precision, and it is small whenever the cameras see the object at all.
+    * ``height_uncertainty_m`` — how far ``top_z`` can be off. With one camera the height is
+      *guessed* from the silhouette (a low deep thing and a tall shallow one cast the same
+      shadow), so this can be centimetres while the lateral figure is millimetres. A caller that
+      descends onto a surface must look at this one, not at ``uncertainty_m``.
+    * ``view_disagreement_m`` — the spread between per-view fits. Small when the views agree;
+      large when one is partly occluded or shows something else. An average of a good and a bad
+      view can look perfectly confident, which is why this is reported separately.
+    """
+
     frame: GeometryFrame = "world"
     centroid: list[float] | None = None  # [x, y, z] metres
     bbox3d_min: list[float] | None = None
@@ -210,6 +228,12 @@ class Geometry(Frozen):
     yaw_rad: float | None = None
     uncertainty_m: float | None = None
     views_used: int | None = None
+    lateral_uncertainty_m: float | None = None
+    height_uncertainty_m: float | None = None
+    view_disagreement_m: float | None = None
+    #: How the object was read from silhouettes: ``"prism"`` (it stands on its own footprint) or
+    #: ``"hang"`` (wider above than below, e.g. a bowl). ``None`` for the depth/single-view paths.
+    method: str | None = None
 
 
 class Provenance(Frozen):
