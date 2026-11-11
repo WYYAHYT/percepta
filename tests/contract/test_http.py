@@ -148,12 +148,15 @@ def test_disabled_tools_are_absent_but_failing_enabled_tools_are_visible() -> No
     # ci.yaml sets `tools.sam3.enabled: false` -> absent from every tool listing.
     with TestClient(create_app(load_config(CI_CONFIG))) as test_client:
         health = {tool["name"]: tool for tool in test_client.get("/healthz").json()["tools"]}
-        assert set(health) == {"fake", "multi_view_3d"}
+        # The set is spelled out rather than counted: a new entry point must be an explicit
+        # decision here, not something that slips into the deployment unnoticed.
+        expected = {"fake", "multi_view_3d", "stereo_3d"}
+        assert set(health) == expected
         assert "sam3" not in health
         listed = {tool["name"] for tool in test_client.get("/v1/tools").json()["tools"]}
-        assert listed == {"fake", "multi_view_3d"}
+        assert listed == expected
         info = {tool["name"] for tool in test_client.get("/v1/info").json()["tools"]}
-        assert info == {"fake", "multi_view_3d"}
+        assert info == expected
 
     # Default config: `sam3` is unlisted -> enabled -> present and honestly `error` (D9).
     with TestClient(create_app(AppConfig())) as test_client:

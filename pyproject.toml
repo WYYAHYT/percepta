@@ -28,6 +28,11 @@ dependencies = [
 # Serving over HTTP. Kept out of the default install so the core stays light.
 service = ["fastapi>=0.110", "uvicorn>=0.27"]
 
+# The SGBM stereo backend needs OpenCV. Optional for the same reason as the others:
+# the core stays importable and testable without a heavy wheel, and `stereo_3d`
+# reports a clear error if asked to run without it.
+stereo = ["opencv-python-headless>=4.9"]
+
 # NOTE: there is deliberately NO `sam3` extra here.
 #
 # There used to be one, and it was broken by construction: resolving `torch` from PyPI
@@ -46,6 +51,7 @@ percepta = "percepta.cli:main"
 fake = "percepta.tools.fake:FakeTool"
 sam3 = "percepta.tools.sam3:Sam3Tool"
 multi_view_3d = "percepta.tools.multi_view_3d:MultiView3DTool"
+stereo_3d = "percepta.tools.stereo_3d:Stereo3DTool"
 
 [dependency-groups]
 # PEP 735 groups. `uv sync` installs `dev` by default, so a fresh clone can run the
