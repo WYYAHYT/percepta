@@ -34,7 +34,6 @@ stereo-ness of a result can be checked from the output alone.
 from __future__ import annotations
 
 import time
-from itertools import combinations
 from typing import Any
 
 import numpy as np
@@ -186,24 +185,20 @@ class Stereo3DTool(BaseTool):
         calibrated = {
             name: cal for name, cal in (ctx.calibration or {}).items() if name in ctx.images
         }
-        if len(calibrated) < 2:
+        # Exactly two views. A stereo tool that quietly accepted three would have to choose a
+        # pair, which means silently discarding a camera the caller passed -- the caller's
+        # decision, not the tool's. Three views belong to `triview_3d`.
+        if len(calibrated) != 2:
             self._log(
                 ctx,
-                f"{ERR_NEEDS_TWO_VIEWS}: got {len(calibrated)} calibrated view(s); "
-                f"images={sorted(ctx.images)}, calibrated={sorted(ctx.calibration or {})}",
+                f"{ERR_NEEDS_TWO_VIEWS}: stereo_3d takes exactly 2 calibrated views, got "
+                f"{len(calibrated)} (images={sorted(ctx.images)}, "
+                f"calibrated={sorted(ctx.calibration or {})}); use triview_3d for three",
                 level="warning",
             )
             return []
 
-        left_name, right_name = self._resolve_pair(ctx, calibrated, context)
-        if left_name is None:
-            self._log(
-                ctx,
-                f"{ERR_NEEDS_TWO_VIEWS}: no pair selected and no unambiguous default; "
-                "pass stereo_left/stereo_right",
-                level="warning",
-            )
-            return []
+        left_name, right_name = sorted(calibrated)
 
         backend = str(context.get("stereo_backend", "sgbm")).lower()
         if backend != "sgbm":
@@ -316,6 +311,10 @@ class Stereo3DTool(BaseTool):
         rays = np.stack(
             [cols.astype(np.float64), rows.astype(np.float64), np.ones(rows.size)], axis=1
         )
+        # ``dist`` is distance along the optical axis, and the camera convention (spec §4) is
+        # that optical axis is -z. Multiplying a +z ray by a positive depth would place every
+        # point BEHIND the camera, which is the sign error this comment exists to prevent.
+        rays[:, 2] = -1.0
         rect_pts = (K_rect_inv @ rays.T).T * dist[:, None]
         a_pts = (info["R_a_to_rect"].T @ rect_pts.T).T
         T_world_a = np.asarray(cal_l.T_world_cam, dtype=np.float64)
@@ -397,41 +396,6 @@ class Stereo3DTool(BaseTool):
         ]
 
     # -- helpers -------------------------------------------------------------------
-
-    def _resolve_pair(
-        self, ctx: ToolContext, calibrated: dict[str, Calibration], context: dict[str, Any]
-    ) -> tuple[str | None, str | None]:
-        """Honour an explicit choice; use the only pair when exactly one exists.
-
-        With three calibrated views there is no defensible default. Which pair to use is the
-        caller's decision, and picking one here would silently discard the other camera, so the
-        tool names the available pairs in the log and returns nothing.
-        """
-        left = context.get("stereo_left")
-        right = context.get("stereo_right")
-        if left is not None and right is not None:
-            if left not in calibrated or right not in calibrated:
-                self._log(
-                    ctx,
-                    f"stereo_left/stereo_right {left!r}/{right!r} are not both calibrated "
-                    "and imaged",
-                    level="warning",
-                )
-                return None, None
-            return str(left), str(right)
-
-        if len(calibrated) == 2:
-            names = sorted(calibrated)
-            return names[0], names[1]
-
-        self._log(
-            ctx,
-            f"{len(calibrated)} calibrated views but no stereo_left/stereo_right: refusing to "
-            "guess which pair the caller meant (available: "
-            f"{[f'{a}-{b}' for a, b in combinations(sorted(calibrated), 2)]})",
-            level="warning",
-        )
-        return None, None
 
     @staticmethod
     def _log(ctx: ToolContext, message: str, *, level: str = "debug") -> None:

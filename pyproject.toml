@@ -52,6 +52,7 @@ fake = "percepta.tools.fake:FakeTool"
 sam3 = "percepta.tools.sam3:Sam3Tool"
 multi_view_3d = "percepta.tools.multi_view_3d:MultiView3DTool"
 stereo_3d = "percepta.tools.stereo_3d:Stereo3DTool"
+triview_3d = "percepta.tools.triview_3d:Triview3DTool"
 
 [dependency-groups]
 # PEP 735 groups. `uv sync` installs `dev` by default, so a fresh clone can run the

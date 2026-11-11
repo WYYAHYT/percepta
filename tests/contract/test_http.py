@@ -150,7 +150,7 @@ def test_disabled_tools_are_absent_but_failing_enabled_tools_are_visible() -> No
         health = {tool["name"]: tool for tool in test_client.get("/healthz").json()["tools"]}
         # The set is spelled out rather than counted: a new entry point must be an explicit
         # decision here, not something that slips into the deployment unnoticed.
-        expected = {"fake", "multi_view_3d", "stereo_3d"}
+        expected = {"fake", "multi_view_3d", "stereo_3d", "triview_3d"}
         assert set(health) == expected
         assert "sam3" not in health
         listed = {tool["name"] for tool in test_client.get("/v1/tools").json()["tools"]}

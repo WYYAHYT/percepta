@@ -174,6 +174,28 @@ def test_a_longer_baseline_reduces_the_reported_uncertainty():
     assert 1.6 < ratio < 2.4, f"uncertainty ratio {ratio:.2f}, expected ~2 for 2x baseline"
 
 
+def test_recovered_points_lie_in_front_of_the_camera_not_behind_it():
+    """The camera looks down -z (spec §4); a positive depth must land on that side.
+
+    This is the test that catches the sign error the earlier assertions missed: they only
+    checked |depth|, so a point at -1.0 m passed a check for a plane at 1.0 m. Here the side of
+    the camera is asserted directly.
+    """
+    left, right, cal = _pair(plane_y=1.0)
+    tool = Stereo3DTool()
+    tool.load({})
+    percepts = tool.perceive(
+        _context({"left": left, "right": right}, cal, stereo_num_disparities=256), []
+    )
+    assert percepts and percepts[0].status == "ok"
+    geometry = percepts[0].geometry
+    # The cameras look along +world-y from the origin, so the object must be at +y.
+    assert geometry.centroid[1] > 0.0, (
+        f"centroid y = {geometry.centroid[1]:.3f}: geometry landed behind the cameras"
+    )
+    assert geometry.centroid[1] == pytest.approx(1.0, abs=0.06)
+
+
 # ---------------------------------------------------------------------------
 # Refusing to answer
 # ---------------------------------------------------------------------------
@@ -188,11 +210,11 @@ def test_one_view_is_refused():
     assert ERR_NEEDS_TWO_VIEWS == "stereo_needs_two_calibrated_views"
 
 
-def test_three_views_without_an_explicit_pair_are_refused():
-    """With three cameras there is no defensible default; the tool must not choose.
+def test_three_views_are_refused_outright():
+    """stereo_3d takes exactly two views; three belong to triview_3d.
 
-    Choosing would silently discard whichever camera it did not pick, and that is the caller's
-    decision, not the tool's.
+    Accepting three would force the tool to pick a pair, discarding a camera the caller chose to
+    pass. Delegating that decision to another tool keeps the boundary where the caller put it.
     """
     rot = _rotation_looking_along_plus_y()
     cal = {
@@ -206,21 +228,16 @@ def test_three_views_without_an_explicit_pair_are_refused():
     assert tool.perceive(_context(images, cal), []) == []
 
 
-def test_explicit_pair_is_honoured_when_three_views_are_supplied():
+def test_two_views_are_used_without_being_named():
+    """With exactly two views the pair is unambiguous, so no stereo_left/right is needed."""
     left, right, cal = _pair()
-    cal["other"] = _calibration("other", [5.0, 0.0, 0.0], _rotation_looking_along_plus_y())
-    images = {"left": left, "right": right, "other": left}
     tool = Stereo3DTool()
     tool.load({})
     percepts = tool.perceive(
-        _context(
-            images, cal, stereo_left="left", stereo_right="right", stereo_num_disparities=256
-        ),
-        [],
+        _context({"left": left, "right": right}, cal, stereo_num_disparities=256), []
     )
     assert len(percepts) == 1 and percepts[0].status == "ok"
-    assert percepts[0].extras["left"] == "left"
-    assert percepts[0].extras["right"] == "right"
+    assert {percepts[0].extras["left"], percepts[0].extras["right"]} == {"left", "right"}
 
 
 def test_unconfigured_backend_is_refused_not_silently_substituted():
