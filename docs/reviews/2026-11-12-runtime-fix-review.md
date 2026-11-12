@@ -4,6 +4,9 @@
 > 最终930 passed、9 skipped，Ruff与真实HTTP e2e通过。以下审查原文保留12:58时的判断，
 > 完整改动前后、红绿及剩余边界见[修改记录末尾](../documentation-changes.md)。
 
+> **再后续状态（同日15:13，D45）**：下文历史上另列的3项辅助API边界已按授权修复，新增54项回归；
+> 当前984 passed、9 skipped，Ruff与真实HTTP e2e通过。历史“仍待办”不改写，详见页末与修改记录。
+
 **复查日期：2026-11-12，Asia/Shanghai（UTC+08:00）；报告整理时间：12:58。**
 报告最终核对时间为同日13:00。
 修复前基线为 `a761656`，被审查提交为 `9779a96`，共43个文件、2909行增加、307行删除。
@@ -187,3 +190,11 @@ table_plane → 500 {"error":"internal","message":"unexpected error while percei
 新回归先红／兼容检查后绿，共27项；完整CPU为930 passed、9 skipped（69.55s）。
 Ruff和真实uvicorn e2e通过；详细逐项旧源码／新行为及分组证据见[修改记录](../documentation-changes.md)。
 没有重跑GPU或任务精度；此前3项辅助API边界仍待办，DNS／TLS同步取消及原生线程的既有边界未变。
+
+**七、同日辅助API修复记录（15:13，UTC+08:00）**
+
+此前单列的3项辅助边界在用户授权后完成：融合在像素解码／分配前按标定检查声明尺寸和PNG实际头尺寸；
+PlaneGrid整数选择保留NumPy顺序／重复／负索引语义；fit严格遵守包含端点的网格预算并覆盖世界bounds。
+新增54项回归，最终CPU为984 passed、9 skipped（68.33s），Ruff／真实HTTP e2e通过；原问题与红绿证据
+见[修改记录](../documentation-changes.md) D45批次。没有重跑GPU／精度；合法匹配大图和显式构造大网格的
+内存预算仍由调用方负责，本轮不新增全局像素上限。

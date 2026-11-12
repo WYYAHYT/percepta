@@ -181,9 +181,17 @@ def _encode_png_mask(mask: np.ndarray) -> str:
     return bytes_b64(buf.getvalue())
 
 
-def _decode_png_mask(data: str) -> np.ndarray:
-    with Image.open(io.BytesIO(b64_bytes(data))) as image:
-        arr = np.asarray(image.convert("L"))
+def _decode_png_mask(data: str, expected_size: tuple[int, int] | None = None) -> np.ndarray:
+    """Check a bounded PNG's header before decoding pixels; retain unbounded PIL errors."""
+    try:
+        with Image.open(io.BytesIO(b64_bytes(data))) as image:
+            if expected_size is not None and image.size[::-1] != tuple(expected_size):
+                raise ValueError(f"png mask shape {image.size[::-1]} != expected size {tuple(expected_size)}")
+            arr = np.asarray(image.convert("L"))
+    except (OSError, Image.DecompressionBombError) as exc:
+        if expected_size is None:
+            raise
+        raise ValueError(f"cannot decode png mask: {exc}") from exc
     return arr > 127
 
 
@@ -200,8 +208,41 @@ def to_mask(mask: np.ndarray, encoding: str = "rle") -> Mask:
     raise ValueError(f"unsupported mask encoding {encoding!r}")
 
 
-def to_array(mask: Mask) -> np.ndarray:
-    """Decode a :class:`~percepta.schema.Mask` back to a bool ndarray."""
+def to_array(mask: Mask, *, expected_size: tuple[int, int] | None = None) -> np.ndarray:
+    """Decode a mask, optionally requiring caller-supplied pixel dimensions before allocation.
+
+    Args:
+        mask: Encoded mask whose pixels use row-major ``array[v, u]`` order.
+        expected_size: Optional positive integer ``(H, W)`` (booleans are invalid) to check
+            against declared dimensions and the PNG header before decoding pixels.
+            This bounds decoding to the caller's dimensions;
+            it does not impose a global pixel limit or budget large valid dimensions.
+
+    Returns:
+        Boolean ``(H, W)`` pixels; encoding ``none`` produces an all-false array.
+
+    Raises:
+        ValueError: Required fields or dimensions are invalid, or a bounded PNG is corrupt
+            or rejected by Pillow's decompression-bomb protection. Without expected_size,
+            underlying Pillow exceptions retain their existing types.
+
+    Example:
+        >>> payload = Mask(encoding="rle", size=(2, 3), counts=[2, 2, 2])
+        >>> to_array(payload, expected_size=(2, 3)).tolist()
+        [[False, False, True], [True, False, False]]
+    """
+    if expected_size is not None:
+        try:
+            expected_size = tuple(expected_size)
+        except TypeError as exc:
+            raise ValueError("expected_size must contain two positive integer dimensions") from exc
+        if len(expected_size) != 2 or any(
+            isinstance(size, (bool, np.bool_)) or not isinstance(size, (int, np.integer)) or size <= 0
+            for size in expected_size
+        ):
+            raise ValueError("expected_size must contain two positive integer dimensions")
+        if mask.size is not None and tuple(mask.size) != expected_size:
+            raise ValueError(f"mask size {tuple(mask.size)} != expected size {expected_size}")
     if mask.encoding == "rle":
         if mask.counts is None or mask.size is None:
             raise ValueError("rle mask without counts/size")
@@ -209,7 +250,7 @@ def to_array(mask: Mask) -> np.ndarray:
     if mask.encoding == "png":
         if not mask.data:
             raise ValueError("png mask without data")
-        arr = _decode_png_mask(mask.data)
+        arr = _decode_png_mask(mask.data, expected_size)
         if mask.size is not None and arr.shape != tuple(mask.size):
             raise ValueError(f"png mask shape {arr.shape} != declared size {tuple(mask.size)}")
         return arr

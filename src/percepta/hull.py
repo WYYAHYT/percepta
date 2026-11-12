@@ -22,6 +22,7 @@ allow" for heights, which is what the height search needs.
 from __future__ import annotations
 
 import math
+import operator
 from dataclasses import dataclass
 
 import numpy as np
@@ -73,13 +74,57 @@ class PlaneGrid:
 
     @classmethod
     def fit(cls, lo_xy, hi_xy, max_cells: int = DEFAULT_GRID_CELLS) -> PlaneGrid:
-        """Grid covering the box with at most ``max_cells`` cells."""
+        """Cover world-XY bounds with cell centres while respecting a cell-count budget.
+
+        Args:
+            lo_xy: World ``[x, y]`` metres of the first cell centre.
+            hi_xy: Upper world ``[x, y]`` bounds, covered by the last cell centres.
+            max_cells: Integer budget of at least four, allowing two centres per axis.
+
+        Returns:
+            A grid with ``nx * ny <= max_cells`` and ``cell >= MIN_CELL_M``. Cell
+            centres follow ``xy = lo + [column, row] * cell`` in row-major order.
+
+        Raises:
+            ValueError: The budget is not a representable integer of at least four, or
+                bounds are nonfinite, reversed or have an unrepresentable span.
+
+        Example:
+            >>> grid = PlaneGrid.fit([0, 0], [1, 1], max_cells=4)
+            >>> (grid.nx, grid.ny, grid.cell)
+            (2, 2, 1.0)
+        """
+        try:
+            budget = operator.index(max_cells)
+            float(budget)
+        except (TypeError, OverflowError) as exc:
+            raise ValueError("max_cells must be an integer of at least 4") from exc
+        if isinstance(max_cells, (bool, np.bool_)) or budget < 4:
+            raise ValueError("max_cells must be an integer of at least 4")
         lo = np.asarray(lo_xy, dtype=np.float64).reshape(2)
         hi = np.asarray(hi_xy, dtype=np.float64).reshape(2)
-        span = np.maximum(hi - lo, 1e-6)
-        area = float(span[0] * span[1])
-        cell = max(MIN_CELL_M, math.sqrt(area / float(max_cells)))
-        return cls.around(lo, hi, cell)
+        with np.errstate(over="ignore", invalid="ignore"):
+            span = hi - lo
+        if not np.isfinite(lo).all() or not np.isfinite(hi).all() or not np.isfinite(span).all() or np.any(span < 0):
+            raise ValueError("grid bounds must be finite, ordered and have a finite span")
+        span = np.maximum(span, 1e-6)
+        area = float(span[0]) * float(span[1])
+        estimate = math.sqrt(area / budget) if math.isfinite(area) else math.sqrt(float(span[0]) / budget) * math.sqrt(float(span[1]))
+        cell = max(MIN_CELL_M, estimate)
+        scale = float(span.max())
+        grid = cls.around(lo, hi, cell) if math.isfinite(scale / cell) else None
+        if grid is None or grid.size > budget:
+            if budget == 4:
+                cell = max(cell, scale)
+            else:
+                x, y = span / scale
+                # ceil(span/cell)+1 <= span/cell+2; solve the resulting cell-count bound.
+                ratio = (x + y + math.sqrt((x + y) ** 2 + (budget - 4) * x * y)) / (budget - 4)
+                cell = math.nextafter(max(cell, scale * ratio), math.inf)
+            grid = cls.around(lo, hi, cell)
+        if np.any(lo + np.array([grid.nx - 1, grid.ny - 1]) * grid.cell < hi):
+            grid = cls(lo=lo, cell=math.nextafter(grid.cell, math.inf), nx=grid.nx, ny=grid.ny)
+        return grid
 
     @property
     def size(self) -> int:
@@ -93,8 +138,22 @@ class PlaneGrid:
         return np.stack([gx.ravel(), gy.ravel()], axis=1)
 
     def points(self, cells: np.ndarray, z: float) -> np.ndarray:
-        """``(N, 3)`` world points for the given cell indices at height ``z``."""
-        xy = self.xy()[cells] if cells.dtype == bool else self.xy()[np.flatnonzero(cells)]
+        """Return world points for selected row-major cell indices at a fixed height.
+
+        Args:
+            cells: One-dimensional integer indices or a boolean selection over the grid.
+                Integers retain NumPy order, duplicates and negative-index semantics.
+            z: World height in metres.
+
+        Returns:
+            ``(N, 3)`` world XYZ metres; ``xy = lo + [column, row] * cell``.
+
+        Example:
+            >>> grid = PlaneGrid(np.array([0., 0.]), 0.5, 2, 2)
+            >>> grid.points(np.array([3, 0, 3]), 2.).tolist()
+            [[0.5, 0.5, 2.0], [0.0, 0.0, 2.0], [0.5, 0.5, 2.0]]
+        """
+        xy = self.xy()[cells]
         return np.column_stack([xy, np.full(len(xy), float(z))])
 
     def at_height(self, z: float) -> np.ndarray:

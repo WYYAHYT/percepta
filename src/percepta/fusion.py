@@ -124,6 +124,7 @@ def _collect_views(
 
     Tolerant by contract: a percept without a mask, a camera without calibration, an
     undecodable RLE payload or a size mismatch is silently skipped rather than raising.
+    Mask declarations and PNG headers must match calibration before decoding pixels.
     A supplied nonphysical calibration raises ``ValueError`` before it can produce geometry.
     """
     calibration = calibration or {}
@@ -151,7 +152,7 @@ def _collect_views(
             if observation.mask is None:
                 continue
             try:
-                mask = to_array(observation.mask)
+                mask = to_array(observation.mask, expected_size=expected)
             except (ValueError, TypeError):
                 continue
             if mask.ndim != 2 or tuple(mask.shape) != expected:

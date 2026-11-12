@@ -812,3 +812,28 @@ When replacing a local runner, an explicitly reused cache is detached before clo
 runner and becomes the new runner's responsibility. A different old cache closes normally;
 if replacement construction fails, the supplied cache closes best-effort without hiding the
 original construction error. No new public API, schema or dependency is needed.
+
+## D45 — Bound mask decoding before allocation and honor grid selection and budgets
+
+*Date:* 2026-11-12. *Before-fix baseline:* `d06241e`. This repairs the three auxiliary API
+boundaries previously deferred in the audit and follow-up review. Original findings remain
+in the dated modification and review records.
+
+Fusion supplies calibrated `(H, W)` to the optional keyword-only `to_array(expected_size=...)`.
+Declared mask dimensions must match before RLE or empty-mask allocation; PNG dimensions are
+checked from the image header before pixel conversion, even when Mask.size is absent or forged.
+Rejected image headers and Pillow decompression-bomb errors map to the bounded decoder's
+ValueError so fusion skips the unusable mask. Pillow protection is retained; ordinary one-argument
+decoding keeps its prior exception behavior. This bounds decoded dimensions to the caller's
+calibration, not to a new global pixel limit; compressed/base64 input bytes still exist in memory.
+
+PlaneGrid.points uses NumPy selection directly for both boolean selectors and integer indices.
+Integer order, duplicates, empty integer selection and negative indices have their usual meanings;
+out-of-range indices fail normally. Coordinates are unchanged: lo is cell centre `(0, 0)` in
+world XY, flattened index is `row * nx + column`, and selected points use the requested world Z.
+
+PlaneGrid.fit retains the area-based initial spacing when already within budget; otherwise it
+increases spacing until rounded grid dimensions, including endpoint centres, fit max_cells.
+The grid continues to cover the requested world bounds and retains MIN_CELL_M=0.0005.
+Each axis has at least two centres, so the budget must be an integer of at least four;
+invalid budgets or nonfinite/reversed bounds raise ValueError before grid allocation.

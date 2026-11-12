@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from PIL import Image
 
 from percepta.masks import (
     box_iou,
@@ -139,6 +140,16 @@ def test_rle_mask_rejects_inconsistent_counts():
         Mask(encoding="rle", size=(2, 2), counts=[3, 2])  # 5 != 4
     with pytest.raises(ValueError, match="requires counts"):
         Mask(encoding="rle", size=(2, 2))
+
+
+@pytest.mark.parametrize("error", [OSError("invalid PNG"), Image.DecompressionBombError("oversized PNG")])
+def test_unbounded_png_decode_retains_pillow_exception_types(monkeypatch, error):
+    def broken_png(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(Image, "open", broken_png)
+    with pytest.raises(type(error)):
+        to_array(Mask(encoding="png", data="YQ=="))
 
 
 def test_image_round_trip_png_jpeg_raw():

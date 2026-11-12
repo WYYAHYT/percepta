@@ -8,6 +8,14 @@ changed. Every design decision referenced as `D<n>` lives in [`docs/decisions.md
 
 ## Unreleased
 
+### Auxiliary API fixes — 2026-11-12
+
+* Check calibrated mask dimensions before RLE/empty-mask allocation or PNG pixel decoding;
+  retain malformed-mask skipping and Pillow's image-size protection (D45).
+* Make PlaneGrid integer selection preserve indices, order and duplicates; enforce the fit
+  cell budget for square and extreme-aspect bounds while retaining coverage and the cell floor.
+* Preserve the dated prior findings and add before/after evidence in the modification log.
+
 ### Follow-up review fixes — 2026-11-12
 
 * Preserve healthy workers after declared request errors, including SAM3 request errors;

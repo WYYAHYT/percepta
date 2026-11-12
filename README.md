@@ -351,6 +351,9 @@ Frozen, and the most common source of bugs:
 * Calibration requires positive-focal, zero-skew pinhole intrinsics and a finite proper rigid
   camera-to-world transform. Invalid matrices are rejected before world geometry is produced.
 * **No calibration ⇒ no `Geometry`.** Metres are never inferred from pixels alone.
+* Fusion checks mask dimensions against calibration before allocating decoded pixels; PNG
+  headers are checked before conversion. PlaneGrid fitting keeps its cell budget even for
+  long, narrow bounds, and integer cell selections retain their order and duplicates.
 * Every geometry carries `frame="world"` and a non-null `uncertainty_m`. The current
   single-view table estimate has a height-uncertainty floor of 0.05 m; this is an assumption,
   not a guaranteed error bound.

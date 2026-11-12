@@ -1,8 +1,8 @@
 # 文档修订记录
 
-> **当前状态（2026-11-12 14:33，D44后续修复）**：复查中的R1–R5已按授权修复，新增27项回归；
-> 最终CPU测试930 passed、9 skipped，Ruff与真实HTTP e2e通过。原审计、复查发现和旧结论保留，
-> 本次旧代码／新代码、红绿证据及仍保留的边界见本页末尾；不将绿测等同于所有边界均已证明。
+> **当前状态（2026-11-12 15:13，D45辅助API修复）**：此前登记的3项辅助边界已修复，新增54项回归；
+> 最终CPU测试984 passed、9 skipped，Ruff与真实HTTP e2e通过。R1–R5的修复记录及各批次原文保留，
+> 本次旧代码／新代码、红绿证据及资源边界见页末；不将绿测等同于所有输入与负载均已证明。
 
 ## 2026-11-12：对齐已部署实现，保留历史原文
 
@@ -382,3 +382,63 @@ poll支持本Linux部署及高fd，不由此新增Windows支持。几何无效�
 没有运行GPU forward、模型精度、长期压力或跨机部署；未更换模型／权重，未新增公共API或依赖。
 此前3项低优先辅助API边界仍在待办（超大direct-fuse mask分配、PlaneGrid整数索引helper、
 极端长宽比grid上限）。原有 `.qoder/` 配置不纳入提交；修复仅保存在本地，未推送／发布。
+
+## 2026-11-12：修复3项辅助API边界（D45）
+
+- **修改日期**：2026-11-12，Asia/Shanghai（UTC+08:00）。
+- **修改时段与最终记录时间**：同日14:53–15:13（UTC+08:00）。
+- **修改前基线**：`d06241e`，`fix: preserve worker recovery and cache ownership`。
+- **用户授权**：“OK，处理这些问题”，对应此前3项已登记的辅助／插件API边界；不扩展新的模型功能。
+- **版本**：规格修订号v0.3.0-doc.5；包0.3.0、schema percepta/v1、线协议版本与模型资产不变。
+- **状态**：超大不匹配mask解码前分配、PlaneGrid整数索引、fit网格预算3项均已按各自反例修复。
+
+本页顶部修改前内容保留：
+
+> **当前状态（2026-11-12 14:33，D44后续修复）**：复查中的R1–R5已按授权修复，新增27项回归；
+> 最终CPU测试930 passed、9 skipped，Ruff与真实HTTP e2e通过。原审计、复查发现和旧结论保留，
+> 本次旧代码／新代码、红绿证据及仍保留的边界见本页末尾；不将绿测等同于所有边界均已证明。
+
+前几批记录中的“3项辅助边界仍待办”是当时状态，原句保留；本节为后续修复，不改写此前审查。
+完整旧文件与本批差异可从Git核对：
+
+```bash
+git show d06241e:src/percepta/hull.py
+git show d06241e:src/percepta/masks.py
+git diff d06241e -- src/percepta tests README.md percepta-SPEC.md docs CHANGELOG.md
+```
+
+### 修改前后及安全复现
+
+| 编号 | 原代码／实际后果 | 修复及原因 | 回归覆盖 |
+|---|---|---|---|
+| A1 · 融合mask分配 | `_collect_views` 先 `to_array(mask)`，解码后才比较标定尺寸。8×6标定配 `Mask(rle,size=(10**6,10**6),counts=[0,10**12])` 会先尝试1e12个bool像素；PNG在convert后才检查声明，伪装或省略size可先解压 | `to_array(mask, *, expected_size=None)`新增可选尺寸约束，fusion传标定(H,W)。声明尺寸不符在RLE／none分配前拒绝，PNG实际header在convert前校验；有界路径把坏PNG／Pillow bomb转ValueError供fusion跳过，保留Pillow保护和旧单参异常类型 | RLE／none用allocation spy安全拦截，不做大分配；PNG用小文件+convert spy证明先检查header，包含伪装／省略声明、坏PNG／bomb跳过、三编码兼容及无声明合法PNG；new expected_size要求两个正整数，负负尺寸、零、小数、bool、错误长度等在分配前拒绝，接受np.integer |
+| A2 · 整数索引 | `self.xy()[cells] if cells.dtype == bool else self.xy()[np.flatnonzero(cells)]` 把整数索引当布尔选择。lo=(1,2)、cell=.5、nx=3、ny=2时，[0,3]误得唯一点(1.5,2,z)，而非第0／3格 | 直接 `self.xy()[cells]`，采用NumPy已有选择语义；保持整数顺序、重复项、负索引与空整数选择，bool路径不变。索引位置仍是row*nx+column，世界xy=lo+[column,row]*cell | 检查[0,3]、[3,0,3]、[-1,0]、空数组和bool等价；精确验证世界XYZ及输出数量 |
+| A3 · fit超预算 | `cell=sqrt(area/max_cells)` 后 `around()` 每轴ceil+1，未计端点与窄轴最少2格。10×10m、budget10000实际10201；[1e6,.001]、budget60000实际15491936格，后续xy会按此分配 | 保留未超预算的原初估；超预算时按含ceil/+1的保守上界增大cell，至少4格整数预算。保留MIN_CELL_M=.0005、首中心lo与世界范围覆盖；补面积／比例溢出安全计算、末中心1ulp覆盖修正，非法bounds／不可表示跨度或预算明确ValueError | 正方形端点、两向极端aspect、4／5／6预算、格距floor、正常未超预算不变、非法预算、非有限／反向／跨度溢出、有限大面积、比例溢出及固定1ulp边界。全部仅检查网格元数据或小网格，不尝试巨量分配 |
+
+资源保护按解码后的像素尺寸实现：PNG仍需解码已有base64输入字节；合法且与标定匹配的大尺寸仍可分配，
+由调用方提供其资源预算。本批没有新增全局像素上限，没有把一个合法大标定伪装成内存有界证明。
+`PlaneGrid.around()`仍是显式格距构造；严格数量上限由 `fit()` 提供，直接构造网格的调用方仍负责所需尺寸。
+
+### 先红后绿及针对性结果
+
+- mask边界新增22项：首批10项为9红+1兼容；旧Pillow异常2兼容；新expected_size维度10项为6红+4兼容；合计 **15 failed、7 compatible passed → 22 passed**。
+- PlaneGrid新增32项：相同新测试在只读加载的旧基线源码上为 **29 failed、3 compatible passed**，修复后 **32 passed**；没有checkout／覆盖旧工作区。
+- 合计新增54项回归，对应 `tests/unit/test_fusion_mask_bounds.py`、`test_plane_grid.py` 及 `test_masks.py` 的兼容用例。
+- mask／fusion／geometry等相关6组 **135 passed**，28.21s；PlaneGrid／footprint／fusion／geometry相关4组 **111 passed**，20.96s。组间重叠，不能相加成全套数。
+- 新文档示例检查：mask模块5项doctest、hull模块4项doctest均通过。
+- 网格额外20,000组有限正span／预算元数据检查通过，独立只读核对另检10,000组；只验证cell数、最小格距和末中心覆盖，没有创建大网格数组，也不是模型精度测量。
+
+### 最终验收与保留边界
+
+最后源码冻结后执行：
+
+- `uv run --locked pytest -o addopts= -q`：**984 passed、9 skipped**，68.33s；修复前930，新增54项全部纳入。有1条既有Starlette/httpx弃用warning。
+- `uv run --locked ruff check .`：通过；`git diff --check`：通过。
+- `uv run --locked python scripts/e2e_smoke.py`：**E2E OK**；真实uvicorn的HTTP／进程内输出一致，not_found仍HTTP200。
+- `uv run --locked python scripts/check_lock_portability.py`：6份锁均使用官方域名；无新增依赖、锁变更或权重下载。
+- 新接口／坐标／预算语义已交叉核对；README、规格主本／镜像、D45、CHANGELOG及复查报告更新当前状态，旧审计原文保留。
+- 两份规格逐字一致、15个文档模型字段集合与schema一致；本批7份文档的20个唯一Markdown相对链接目标存在，9项mask／hull doctest通过。
+
+此次修复没有运行GPU forward、任务精度、长期压力或跨机部署；不修改模型资产或R1–R5的行为。
+本轮列出的3项已按上述回归修复；不据此声称未知输入或全部负载都不存在缺陷。
+原有 `.qoder/` 配置仍不纳入提交；修复保存在本地，未推送／发布。
