@@ -1,5 +1,9 @@
 # 文档修订记录
 
+> **当前状态（2026-11-12 后续修复，D39）**：`DOC-20261112-01`、`DOC-20261112-02`
+> 已完成坐标计算修复；本页第一批文档审计记录中的“尚未修复”是当时的历史状态。
+> 修改前基线 `5156672`，本次原公式、新公式、回归验证及仍保留的方法限制见页末修复记录。
+
 ## 2026-11-12：对齐已部署实现，保留历史原文
 
 - **修改日期**：2026-11-12，Asia/Shanghai（UTC+08:00）。
@@ -104,6 +108,8 @@ git diff 534066a -- percepta-SPEC.md docs/spec.md README.md configs src/percepta
 
 ### 核对中新确认的代码问题：尚未修复
 
+以下为提交 `5156672` 时的原始审计记录；后续修复状态见本页末尾，原文与复现数字保留。
+
 这两项属于既有 `multi_view_3d` 轮廓路径，本次只修正说明并登记，不改计算，也不声称测试通过就代表问题已解决。
 
 | 编号 | 位置与证据 | 当前影响与状态 |
@@ -127,3 +133,65 @@ git diff 534066a -- percepta-SPEC.md docs/spec.md README.md configs src/percepta
 这些是本次执行结果，不用历史模型测试计数代替本次检查；CPU 回归通过不覆盖上面两个新发现的坐标问题。
 
 未重跑 GPU、未下载或更换模型资产、未执行长期负载验证；上述两个计算问题仍待修复。
+
+## 2026-11-12：修复两处轮廓几何坐标计算（D39）
+
+- **修改日期**：2026-11-12，Asia/Shanghai（UTC+08:00）。
+- **记录整理时间**：2026-11-12 11:00（UTC+08:00）。
+- **修改前基线**：`5156672`，`docs: align specifications and deployment guides with implementation`。
+- **授权与范围**：用户要求重新确认后授权修复，范围是以下两个已复现的坐标计算错误。
+- **状态**：`DOC-20261112-01`、`DOC-20261112-02` 的坐标错误已修复；前一批次的审计原文保留。
+
+| 文件／位置 | 修改前原文或计算 | 修改后与原因 |
+|---|---|---|
+| fusion._hang_cells | `geo.polygon_mask(ring, (grid.ny, grid.nx))`；ring 来自射线与世界平面求交，是以米计的世界 XY | 先按 `(ring - grid.lo) / grid.cell` 转网格像素，再栅格化；grid.lo 已是第0格中心，无需额外半格偏移 |
+| fusion._hang_cells 的取样 | 栅格化后又用 grid.xy 推回整数行列索引取值 | 输出已是同一网格的行优先排列，直接使用 raster.ravel；删除重复取样但保留视图间 OR 合并 |
+| fusion._lateral_uncertainty | `np.linalg.norm(hit[0] - origin[0])`；origin 为 shape(3,) 光心，origin[0] 只是 x 标量 | 改为交点减完整光心向量，消除不确定度对任意世界原点的依赖 |
+| 回归测试 | 原有测试未覆盖以上坐标换算及共同平移场景 | 增加实际相机射线／网格坐标测试和公开 fuse 路径的平移不变性回归；先确认原实现失败，再验证修复通过 |
+| README／spec 两份镜像／图解 | “two confirmed coordinate issues awaiting repair”；“尚未修复”“坐标限制”“世界原点依赖问题” | 当前说明改为 D39 已修复并给正确坐标公式；规格文档修订号变为 v0.3.0-doc.2，包版本与 schema 不变 |
+| decisions／CHANGELOG | D35 的审计补记及前一批 Documentation 中记录为 pending | 原记录保留并追加同日修复状态；新增 D39 和 Unreleased Fixed 条目，不把历史批次改写为当时已修 |
+
+### 修复前的独立复核
+
+- hang：11×11 网格、间隔0.01 m、实际针孔相机射线；相对场景不变，世界 XY 平移100 m。
+  原 helper 的候选格数从1变0；转换坐标后的对照与直接投影网格点检查均为81格。
+- lateral：已有10 cm立方体三视角 fixture，使用公开 `fuse()`。世界 XY 平移 `(10, 20)` m 后，
+  原 lateral／总 uncertainty 从0.020901 m变为0.229853 m；使用完整光心的同公式对照均为0.013827 m。
+
+### 验证结果
+
+先只增加测试，保留原始计算，执行：
+
+```bash
+uv run --locked pytest -o addopts= tests/unit/test_footprint.py \
+  -k 'hang_top_shadow_uses_plane_grid_coordinates or prism_fusion_is_invariant_to_world_translation' -q
+```
+
+结果为 **3 failed、18 deselected**：两个原点下的 hang 格子与直接投影对照一致率仅约0.230；
+公开 fuse 的 lateral 在共同 XYZ 平移前后分别为0.00776237 m与1.82305398 m。
+这确认测试能捕捉原错误，不只是跟随修复后的实现。
+
+修复后同一命令为 **3 passed、18 deselected**。新增测试位于 `tests/unit/test_footprint.py`：
+
+- `test_hang_top_shadow_uses_plane_grid_coordinates`：两个原点，使用真实轮廓射线与独立相机投影对照。
+- `test_prism_fusion_is_invariant_to_world_translation`：公开 fuse 路径，共同 XYZ 平移并同步 table_z，检查质心相对位置、顶部、选中高度、方法和分轴／总 uncertainty。
+
+既有几何回归：
+
+```bash
+uv run --locked pytest -o addopts= tests/unit/test_fusion.py \
+  tests/unit/test_footprint.py tests/unit/test_geometry.py -q
+```
+
+结果为 **70 passed**，18.57 s，未放宽旧断言。独立复核确认非方形网格的 row-major 展平也与
+`grid.xy()` 一致；三维共同平移后的直接距离估计保持不变。Ruff、真实 HTTP e2e、两份规格镜像、
+35 个本地文档／图片链接及差异格式检查通过。
+
+完整 CPU 回归 `uv run --locked pytest -o addopts= -q`：**664 passed、9 skipped**，46.88 s；
+有1条既有 Starlette/httpx 弃用警告。三项新增回归计入通过数，未运行 GPU 模型或更换资产。
+
+### 保留的方法边界
+
+hang 仍按各视角候选做并集，并使用原有 IoU 改善门限筛选；未实现旧注释中所说的
+“与 prism_cells 联合并满足全部视角约束”。本次不把这些设计意图扩成新功能，也不承诺完整对象补全。
+uncertainty 仍为启发式估计，修复距离公式不意味着完成误差标定。未运行 GPU 模型或任务精度评测。

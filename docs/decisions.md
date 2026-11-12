@@ -587,6 +587,9 @@ body — that is what a silhouette hull is — so the remaining excess is expect
 > 详见[文档修订记录中的 DOC-20261112-01／02](documentation-changes.md)。本轮只更新说明和登记
 > 限制，没有修正这两处计算，也不把现有测试通过解释成它们已经解决。
 
+> **2026-11-12 后续修复（D39）**：上面的“尚未修复”保留为文档审计批次的原始状态。
+> 两处坐标计算随后已修正并补回归；hang 的实验性并集策略和不确定度的启发式性质仍保留。
+
 ## D36 — FoundationStereo is an isolated disparity backend, not a segmenter
 
 The first deployed neural stereo model is FoundationStereo 23-51-11 (research license),
@@ -684,3 +687,24 @@ built wheel outside the checkout, and also build a wheel from the source distrib
 Resident backends expose a nonblocking `health_error` snapshot. Registry descriptions record
 terminal failures and idle worker exits as tool `error`, without acquiring the inference lock
 or changing singleton/restart semantics. Service health and introspection share that record.
+
+## D39 — Use explicit coordinate frames for hang rasterization and camera distance
+
+*Date:* 2026-11-12. *Before-fix baseline:* `5156672`. This closes the coordinate defects
+`DOC-20261112-01` and `DOC-20261112-02`; the earlier D35 audit note remains as history.
+
+`_hang_cells()` previously passed world XY polygon vertices directly to the pixel rasterizer.
+Convert them first with `uv_grid = (xy_world - grid.lo) / grid.cell`. `grid.lo` is the world
+position of cell centre `(0, 0)`, so no half-cell offset is needed. Rasterization then operates
+on the same integer grid indices as cell lookup. The per-view union and existing IoU
+improvement gate retain their meanings; this repair does not implement the withdrawn
+all-view/prism-union design or object completion.
+
+`_lateral_uncertainty()` previously used `norm(hit[0] - origin[0])`, but `origin` is already
+the full `(3,)` world-space camera centre. Use `norm(hit[0] - origin)` to measure point-to-camera
+distance. A common translation of camera, plane and object must preserve both that distance
+and the resulting estimate. The uncertainty formula remains a heuristic, not a calibrated bound.
+
+Regression checks cover actual camera rays, world-to-grid rasterization, and the public
+`fuse()` path under common world translations. The dated before/after record and results are
+in [the modification log](documentation-changes.md).

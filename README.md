@@ -341,11 +341,12 @@ Fusion priority: depth (point cloud, percentile bbox, PCA yaw) → multi-view si
 single-view 3D using an explicitly known table plane and assumed object height. Without that
 table information, the single-view no-depth path returns no geometry.
 
-The silhouette path has two confirmed coordinate issues awaiting repair: hang candidates can
-be misplaced, and lateral uncertainty can change with the world origin. See
-`DOC-20261112-01` and `DOC-20261112-02` in the
-[`documentation review`](docs/documentation-changes.md). Its hang output and uncertainty
-must be read with those limits; uncertainty values are estimates, not strict error bounds.
+The 2026-11-12 coordinate fixes (D39) map hang polygons from world XY into grid pixels before
+rasterization and compute lateral uncertainty using the full camera-centre vector. The repair
+history for `DOC-20261112-01` and `DOC-20261112-02` is in the
+[`modification record`](docs/documentation-changes.md). Hang remains an experimental union of
+per-view candidates accepted only when its IoU improves; uncertainty values remain estimates,
+not strict error bounds.
 
 ## Verification
 

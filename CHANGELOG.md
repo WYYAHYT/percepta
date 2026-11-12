@@ -39,6 +39,12 @@ changed. Every design decision referenced as `D<n>` lives in [`docs/decisions.md
 
 ### Fixed
 
+* Correct silhouette hang rasterization by converting world XY polygons to plane-grid pixel
+  coordinates before filling them. Candidate selection retains its existing IoU improvement gate.
+* Compute silhouette lateral uncertainty using the full camera centre rather than its x
+  component, preserving the estimate when the world origin changes. Both fixes (D39,
+  2026-11-12) close the issues recorded in the earlier documentation audit, with coordinate
+  translation regressions.
 * DA3 rejects image sizes that would leave fewer than one processed patch before sending
   data to its worker; a rejected request leaves the resident model usable.
 * DA3 rebases camera poses in float64 before upstream float32 conversion, preserving metric

@@ -30,6 +30,7 @@ from percepta import hull
 from percepta.fusion import (
     HANG_MARGIN,
     MIN_PRISM_STEPS,
+    _hang_cells,
     _prism_grid,
     _prism_views,
     _View,
@@ -113,6 +114,53 @@ def test_grid_is_finite_even_for_a_wide_span():
 def test_grid_never_quantises_below_its_floor():
     grid = hull.PlaneGrid.around([0, 0], [0.1, 0.1], 1e-9)
     assert grid.cell >= hull.MIN_CELL_M
+
+
+@pytest.mark.parametrize("translation", [(0.0, 0.0, 0.0), (100.125, -200.25, 300.5)])
+def test_hang_top_shadow_uses_plane_grid_coordinates(translation):
+    """Real silhouette rays must cover the same cells as direct camera projection."""
+    _, _, _, views = _views((0, 120, 240), 0.10)
+    shift = np.asarray(translation)
+    for view in views:
+        view.T = view.T.copy()
+        view.T[:3, 3] += shift
+    prism_views = _prism_views(views)
+    grid = hull.PlaneGrid(lo=np.array([-0.1, -0.1]) + shift[:2], cell=0.005, nx=41, ny=41)
+    base_z = float(shift[2])
+    prism_cells = hull.column_inside(prism_views, grid, base_z, base_z + 0.10)
+    cells = _hang_cells(prism_views, grid, base_z, 0.10, prism_cells)
+    control = np.logical_or.reduce(
+        [hull._inside_mask(view, grid.at_height(base_z + 0.10)) for view in prism_views]
+    )
+    assert control.any() and not control.all()
+    assert cells is not None
+    # Ray-polygon and nearest-mask-pixel tests can disagree at a one-pixel silhouette boundary.
+    assert np.mean(cells == control) > 0.99
+
+
+def test_prism_fusion_is_invariant_to_world_translation():
+    """Moving the world origin preserves geometry relative to it and its uncertainty."""
+    calibrations, _, masks, _ = _views((0, 120, 240), 0.10)
+    percepts = mask_percepts(calibrations, masks)
+    context = {"table_z": 0.0, "prism_max_height_m": 0.20, "prism_step_m": 0.02}
+    original = fuse(percepts, calibrations, context)
+    shift = np.array([100.125, -200.25, 300.5])
+    translated = {}
+    for camera, calibration in calibrations.items():
+        pose = np.asarray(calibration.T_world_cam).copy()
+        pose[:3, 3] += shift
+        translated[camera] = calibration.model_copy(update={"T_world_cam": pose.tolist()})
+    moved = fuse(percepts, translated, {**context, "table_z": float(shift[2])})
+    assert original is not None and original.geometry is not None
+    assert moved is not None and moved.geometry is not None
+    before, after = original.geometry, moved.geometry
+    assert after.lateral_uncertainty_m == pytest.approx(before.lateral_uncertainty_m, abs=1e-10)
+    assert after.uncertainty_m == pytest.approx(before.uncertainty_m, abs=1e-10)
+    assert after.height_uncertainty_m == pytest.approx(before.height_uncertainty_m, abs=1e-10)
+    assert moved.extras["prism_height_m"] == pytest.approx(original.extras["prism_height_m"])
+    assert after.method == before.method
+    assert after.top_z - shift[2] == pytest.approx(before.top_z, abs=1e-8)
+    np.testing.assert_allclose(np.asarray(after.centroid) - shift, before.centroid, atol=1e-8)
 
 
 # ---------------------------------------------------------------------------

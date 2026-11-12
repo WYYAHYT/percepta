@@ -497,8 +497,8 @@ def _fuse_prism(
     if metrics is None:
         return None
 
-    # An experimental reading for objects wider above than below, kept only when its IoU is
-    # clearly better. Known grid-coordinate and constraint limitations are recorded in _hang_cells.
+    # A union of top-plane silhouette shadows for objects wider above than below, kept only when
+    # its IoU is clearly better. It remains a separate heuristic reading of the same masks.
     hang_cells = _hang_cells(prism_views, grid, table_z, chosen, cells)
     hang_metrics = None if hang_cells is None else hull.footprint_metrics(grid, hang_cells)
     kind = "prism"
@@ -661,14 +661,12 @@ def _hang_cells(
     height: float,
     prism_cells: np.ndarray,
 ) -> np.ndarray | None:
-    """Build the experimental union of per-view top-plane silhouette rasters.
+    """Build a union of top-plane silhouette shadows on a world-plane grid.
 
-    Documentation audit (2026-11-12): the intended hanging reading handles objects wider at the
-    rim, but the current code unions the per-view rasters and leaves ``prism_cells`` unused.
-    World-space polygon vertices are passed directly to the pixel rasterizer without conversion
-    by ``grid.lo``/``grid.cell``. This known coordinate issue can empty or displace the candidate;
-    the intended all-view top/column constraints also remain unimplemented. The caller's IoU
-    improvement gate alone does not establish a reliable hanging reconstruction.
+    Input rays and their plane intersections are in world metres. Polygon coordinates become
+    grid pixels through ``uv = (xy - grid.lo) / grid.cell``; output is a row-major bool cell mask.
+    The per-view masks are unioned. ``prism_cells`` remains accepted but unused by this reading;
+    the caller selects it only when its mean silhouette IoU clearly improves on the prism.
     """
     top_z = table_z + height
     allowed = np.zeros(grid.size, dtype=bool)
@@ -680,15 +678,10 @@ def _hang_cells(
         ring = geo.convex_hull_2d(hits[:, :2])
         if ring.shape[0] < 3:
             return None
-        raster = geo.polygon_mask(ring, (grid.ny, grid.nx))
-        # polygon_mask works in pixel coordinates; map cell centres to grid indices instead
-        xy = grid.xy()
-        cols = np.rint((xy[:, 0] - grid.lo[0]) / grid.cell).astype(np.int64)
-        rows = np.rint((xy[:, 1] - grid.lo[1]) / grid.cell).astype(np.int64)
-        ok = (cols >= 0) & (cols < grid.nx) & (rows >= 0) & (rows < grid.ny)
-        inside = np.zeros(grid.size, dtype=bool)
-        inside[ok] = raster[rows[ok], cols[ok]]
-        allowed |= inside
+        # grid.lo is the centre of cell (0, 0); the rasterizer samples integer pixel centres.
+        ring_uv = (ring - grid.lo) / grid.cell
+        raster = geo.polygon_mask(ring_uv, (grid.ny, grid.nx))
+        allowed |= raster.ravel()
         _ = prism_cells
     return allowed
 
@@ -698,10 +691,9 @@ def _lateral_uncertainty(
 ) -> float:
     """Estimate lateral uncertainty from one-pixel angular error and grid quantisation.
 
-    The intended scale is ``distance / focal / sin(elevation)``, largest for a grazing camera.
-    Documentation audit (2026-11-12): the current distance calculation subtracts the camera's
-    scalar x coordinate instead of its full origin vector. This estimate is therefore dependent
-    on the world origin and needs a distance-formula fix before it can serve as a projection bound.
+    Both ``hit`` and ``origin`` are world-frame metres, so ``distance = norm(hit - origin)``.
+    The projected scale is ``distance / focal / sin(elevation)``, largest for a grazing camera.
+    The worst view sets this heuristic estimate, with half a grid cell added for quantisation.
     """
     worst = 0.0
     for view in prism_views:
@@ -720,7 +712,7 @@ def _lateral_uncertainty(
         hit = geo.ray_horizontal_plane(origin, dirs, table_z + 0.5 * height)
         if not np.all(np.isfinite(hit)):
             continue
-        distance = float(np.linalg.norm(hit[0] - origin[0]))
+        distance = float(np.linalg.norm(hit[0] - origin))
         worst = max(worst, distance / focal / elevation)
     return float(worst + 0.5 * grid.cell)
 
