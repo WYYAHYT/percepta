@@ -2,11 +2,22 @@
 
 All notable changes to `percepta`. Versions follow [SemVer](https://semver.org/); the
 `schema_version` of the wire format (`percepta/v1`) is versioned separately and has not
-changed. Every design decision referenced as `D<n>` lives in [`docs/decisions.md`](decisions.md).
+changed. Every design decision referenced as `D<n>` lives in [`docs/decisions.md`](docs/decisions.md).
 
 ---
 
 ## Unreleased
+
+### Documentation — 2026-11-12
+
+* Align the specification, README, deployment notes, configuration guidance and source
+  documentation with implementation checkpoint `534066a`. Record the previous wording,
+  replacement and reason in [`docs/documentation-changes.md`](docs/documentation-changes.md).
+  Keep historical decisions and withdrawn plan annotations with dated corrections.
+* Clarify geometry-stage ordering, per-tool `fuse=False` behavior, independent model
+  environments, current SAM3 API and the D35 geometry path. Document two newly confirmed
+  silhouette-geometry coordinate issues as pending fixes; this documentation change does
+  not alter their calculations or claim they are resolved.
 
 ### Added
 

@@ -36,11 +36,10 @@ tools:
     backend: subprocess
     python: uv_envs/sam3/.venv/bin/python
     worker_module: percepta.backends.worker
-    # GPU selection is deliberately NOT pinned. This host has 8 H20s shared with other
-    # workloads and no permanently free card, so hardcoding an index (e.g. "2") makes the
-    # worker's speed depend on whatever else landed there — warm-up was measured at 15 s on a
-    # quiet card versus 45–73 s when shared. Leaving it empty lets PyTorch pick the card with
-    # the most free memory (CUDA_DEVICE_ORDER=PCI_BUS_ID + default allocation).
+    # 2026-11-12 correction: empty inherits CUDA_VISIBLE_DEVICES from the parent process.
+    # PyTorch uses the configured/default device; it does not choose the card with most free
+    # memory. Select an available GPU in the shell before launch. Historical warm-up varied
+    # from 15 s on a quiet card to 45–73 s when shared; see docs/documentation-changes.md.
     #
     # Set an explicit index (e.g. "2") when you DO have a dedicated card, or pin several
     # workers on different indices for real parallelism (docs/model-isolation.md §7).

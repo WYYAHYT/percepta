@@ -231,8 +231,8 @@ class Geometry(Frozen):
     lateral_uncertainty_m: float | None = None
     height_uncertainty_m: float | None = None
     view_disagreement_m: float | None = None
-    #: How the object was read from silhouettes: ``"prism"`` (it stands on its own footprint) or
-    #: ``"hang"`` (wider above than below, e.g. a bowl). ``None`` for the depth/single-view paths.
+    #: Geometry route, e.g. ``prism``, ``hang``, ``single_view``, ``stereo_*`` or ``triview_*``.
+    #: ``None`` when the producing route does not set a method (e.g. depth point-cloud fusion).
     method: str | None = None
 
 

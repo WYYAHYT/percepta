@@ -1,20 +1,22 @@
-"""Multi-view 3-D fusion (spec §9, decision D4).
+"""Multi-view 3-D fusion (spec §9, decisions D4 and D35).
 
 :func:`fuse` turns the upstream per-camera percepts of one request into a single
-``Percept`` carrying a ``Geometry`` in the **world** frame. The priority order is exactly
-spec §9:
+``Percept`` carrying a ``Geometry`` in the **world** frame. Paths are tried in this order;
+when one cannot produce geometry, the next path is attempted:
 
 1. **depth** — any calibrated camera whose :class:`~percepta.schema.Calibration` carries a
    ``DepthRef``. Each mask is back-projected to world points, the views are merged, and the
    geometry is the median centre, the 1/99-percentile bbox, the top ``z``, and the PCA yaw
    (spec §9.1).
-2. **silhouette / prism** — no depth, at least two calibrated views (spec §9.2 / D4). Mask
-   outlines are cast onto the table plane, a prism of candidate height ``h`` is built and
-   re-projected into the *other* calibrated views, and the smallest ``h`` whose mean mask
-   IoU reaches ``prism_iou_threshold`` wins.
-3. **single view without depth** — 2-D only plus a *rough* height when the table plane is
-   known, with ``uncertainty_m >= 0.03`` (spec §9.3). Without table information there is no
-   ``Geometry`` at all.
+2. **silhouette / prism** — at least two calibrated masks (spec §9.2 / D35). Candidate
+   footprints retain plane-grid cells whose sampled vertical columns project inside every
+   mask. Each candidate prism is re-projected into all views, and the peak of the complete
+   height/mean-IoU curve wins. ``prism_iou_threshold`` only gates the low-confidence warning.
+   Lateral uncertainty, height uncertainty and per-view disagreement are reported separately.
+3. **single view without depth** — the highest-scoring calibrated mask gives a table-contact
+   ray intersection plus an assumed height (spec §9.3). The result explicitly warns that its
+   height is assumed, with height uncertainty at least 0.05 m. Without table information this
+   path produces no ``Geometry``.
 
 Hard rules enforced here:
 
@@ -76,7 +78,7 @@ MAX_PRISM_HYPOTHESES = 512
 #: a coarse ``prism_step_m`` must not collapse the search to a single guess.
 MIN_PRISM_STEPS = 8
 
-#: A geometry is never reported with an uncertainty below this (depth noise floor).
+#: Minimum uncertainty for the depth point-cloud path; the silhouette paths use separate estimates.
 MIN_UNCERTAINTY_M = 1e-3
 
 #: A "hang" reading (an object wider above than below) is taken only when it explains the other
@@ -406,11 +408,10 @@ def _height_curve(
     heights: list[float],
     threshold: float,
 ) -> list[tuple[float, float]]:
-    """Mean mask IoU for ascending candidate heights, stopping at the first match.
+    """Legacy cone-slice IoU curve, stopping at the first threshold match.
 
-    D4 asks for the *smallest* height reaching ``threshold``, so once a height reaches it
-    no larger height can change the answer (and the full curve is only needed for the
-    arg-max fallback when nothing matches).
+    This preserves the pre-D35 rule for the old helper; the production prism path uses
+    :func:`_height_curve_grid` and the peak of its complete sampled-column IoU curve.
     """
     curve: list[tuple[float, float]] = []
     for height in heights:
@@ -438,7 +439,7 @@ def _height_curve(
 def _fuse_prism(
     views: list[_View], context: dict[str, Any]
 ) -> tuple[Geometry, dict[str, Any]] | None:
-    """Silhouette/prism height search with an exact footprint (P0) and split uncertainty (P1)."""
+    """Search the sampled-column prism IoU peak and report split uncertainty (D35)."""
     prism_views = _prism_views(views)
     if len(prism_views) < 2:
         return None
@@ -496,9 +497,8 @@ def _fuse_prism(
     if metrics is None:
         return None
 
-    # A second reading of the same silhouette, taken as if the object hung from its top: correct
-    # for a bowl or a cup (wider above than below), which a prism reads far too small. Kept only
-    # when it explains the other views clearly better.
+    # An experimental reading for objects wider above than below, kept only when its IoU is
+    # clearly better. Known grid-coordinate and constraint limitations are recorded in _hang_cells.
     hang_cells = _hang_cells(prism_views, grid, table_z, chosen, cells)
     hang_metrics = None if hang_cells is None else hull.footprint_metrics(grid, hang_cells)
     kind = "prism"
@@ -661,17 +661,14 @@ def _hang_cells(
     height: float,
     prism_cells: np.ndarray,
 ) -> np.ndarray | None:
-    """Cells the silhouette allows if the object *hangs* from its top down to the table.
+    """Build the experimental union of per-view top-plane silhouette rasters.
 
-    A prism asks "is the whole column inside every mask"; a bowl is not, because its foot is much
-    narrower than its rim — the prism reading then reports the foot and, with it, a height that is
-    too small. The hanging reading instead asks whether the column from the plane up to the top is
-    inside at the top and does not leave the masks below it; cells only the rim covers are kept.
-
-    Implemented as: the union of the prism footprint with the shadow at the top, kept only where
-    every view's mask still contains the top of the column. It is a coarse reading by nature — it
-    is what a silhouette alone can say about an overhanging shape — so the caller only takes it
-    when it scores clearly better.
+    Documentation audit (2026-11-12): the intended hanging reading handles objects wider at the
+    rim, but the current code unions the per-view rasters and leaves ``prism_cells`` unused.
+    World-space polygon vertices are passed directly to the pixel rasterizer without conversion
+    by ``grid.lo``/``grid.cell``. This known coordinate issue can empty or displace the candidate;
+    the intended all-view top/column constraints also remain unimplemented. The caller's IoU
+    improvement gate alone does not establish a reliable hanging reconstruction.
     """
     top_z = table_z + height
     allowed = np.zeros(grid.size, dtype=bool)
@@ -699,12 +696,12 @@ def _hang_cells(
 def _lateral_uncertainty(
     grid: Any, prism_views: list[_PrismView], table_z: float, height: float
 ) -> float:
-    """How far the footprint edge can move for one pixel of mask error (P1).
+    """Estimate lateral uncertainty from one-pixel angular error and grid quantisation.
 
-    A pixel of mask error displaces the silhouette ray by ``1/f`` in angle; where that ray meets
-    the plane the displacement is ``distance / focal / sin(elevation)``, largest for a grazing
-    camera. The worst view sets the bound, and the grid's own quantisation is added since the
-    reported bounds are cell-quantised.
+    The intended scale is ``distance / focal / sin(elevation)``, largest for a grazing camera.
+    Documentation audit (2026-11-12): the current distance calculation subtracts the camera's
+    scalar x coordinate instead of its full origin vector. This estimate is therefore dependent
+    on the world origin and needs a distance-formula fix before it can serve as a projection bound.
     """
     worst = 0.0
     for view in prism_views:
@@ -748,7 +745,7 @@ def _ray_plane_uncertainty(origin, dirs, hit, view: _View) -> float:
 def _height_uncertainty(
     step: float, score: float, threshold: float, max_height: float
 ) -> float:
-    """How far the height can be off: the search step, widened when the views disagreed (P1).
+    """Height uncertainty from the search step, widened for a below-threshold IoU peak (D35).
 
     ``geometry_low_confidence`` means no height reached the threshold, in which case the arg-max is
     a guess rather than a fit and the bound has to say so.

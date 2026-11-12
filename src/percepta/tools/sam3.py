@@ -11,9 +11,10 @@ Two properties matter here:
    fake backend (``tests/unit/test_sam3_backend.py``) while the real inference path stays
    covered by the ``gpu``-marked smoke test (§14 S9).
 
-Upstream shape, per appendix C: ``build_sam3_image_model(device, checkpoint_path,
-load_from_HF=False, enable_inst_interactivity=True)``, ``Sam3Processor(resolution=1008)``,
-``set_image`` once and then reuse the state for ``set_text_prompt`` /
+Upstream shape, per appendix C: call ``build_sam3_image_model`` with keyword arguments
+``bpe_path``, ``device``, ``checkpoint_path``, ``load_from_HF=False`` and
+``enable_inst_interactivity=True``; construct ``Sam3Processor(model, resolution=1008,
+device=device)``. Pass a PIL image to ``set_image`` and reuse its state for ``set_text_prompt`` /
 ``add_geometric_prompt(box=[cx, cy, w, h])``; outputs are ``masks (N,1,H,W) bool`` at the
 original resolution plus ``boxes`` (xyxy) and ``scores``. If the upstream API moves, only
 this file changes — that is exactly why the spec forbids leaking it into the schema.
@@ -106,12 +107,13 @@ class _Sam3Backend:
             )
         except Exception as exc:  # noqa: BLE001 - any import failure means "unavailable"
             raise ToolUnavailable(
-                "sam3 is not importable; install the 'sam3' extra and provide a checkpoint "
+                "sam3 is not importable; sync the isolated runtime with "
+                "'uv sync --project uv_envs/sam3 --locked', configure its subprocess interpreter "
+                "and provide a checkpoint (see docs/model-isolation.md) "
                 f"({type(exc).__name__}: {exc})"
             ) from exc
 
-        # Validate BEFORE importing the framework path is used, so a wrong checkpoint fails
-        # with a clear message instead of an obscure torch load error.
+        # Validate before loading the checkpoint, so a wrong file gets a clear error.
         try:
             spec = resolve_weights(
                 checkpoint,

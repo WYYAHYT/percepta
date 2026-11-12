@@ -4,6 +4,12 @@ Spec §0.5 says: "有歧义就在 §19 记录问题并选一个保守实现，�
 decisions. **Any agent may read this file; only the Lead edits it.** Each entry names the
 spec clause it resolves.
 
+> **现行说明与修订记录（2026-11-12，核对代码 `534066a`）**：各决策原文保留为历史记录；
+> 后续决策替代了早期实现时，以下带日期的说明指出替代关系。D4/D16 的高度和轮廓算法以 D35
+> 为准，D27 的依赖清单边界以 D33 为准，D36 的部署进度以 D37/D38 为准。
+> 本次只统一说明，不改变代码、接口或功能范围。
+> 本轮各处原文、修订内容和原因汇总于[文档修订记录](documentation-changes.md)。
+
 ## D1 — `unsupported_prompt` is not a `Status` value
 
 *Conflict:* §3.1 freezes `Status = ok|not_found|occluded|unavailable|timeout|invalid_request`,
@@ -48,6 +54,10 @@ pick the global arg-max and add the warning `geometry_low_confidence`.
 `uncertainty_m` = `prism_step_m * (1 + 1/views_used)` plus a margin proportional to the
 IoU shortfall. This makes S5's "centroid error < 2 cm" reproducible.
 
+> **2026-11-12 修订说明（由 D35 替代算法部分）**：上文原定“smallest height whose best score
+> is ≥ … threshold”保留为历史。当前 `fusion.py` 搜索 IoU 峰值；阈值只用于低置信度判断，
+> 不在首次达标处停止。原因及旧规则的高度偏差见 D35。
+
 ## D5 — `object_id` is only stable within a percept
 
 *Conflict:* §3.4 calls `sha1(percept_id + index)` a "稳定 id", but `percept_id` is a
@@ -84,6 +94,9 @@ exposed as `logging.json_output` with the YAML alias `json`, because a pydantic 
 *Decision:* `httpx` is only in the `dev` extra (spec §13 marks it "(测试)"). `PerceptaClient`
 uses `urllib.request` so the runtime package needs no HTTP client beyond the stdlib.
 `httpx` remains the test client for the contract suite.
+
+> **2026-11-12 术语更新**：上文“`dev` extra”保留旧称。当前 `httpx` 位于 PEP 735 的
+> `dependency-groups.dev`，由默认 `uv sync` 安装；不是根项目的可选 extra，也不进入最小运行时。
 
 ## D9 — Default pipeline vs. CI
 
@@ -146,6 +159,18 @@ called when `options.fuse` is true *and* no geometry-kind stage ran (e.g.
 `unavailable`/`invalid_request` stays visible in `percepts`, because that is a real failure
 the caller must see (§16.4).
 
+> **2026-11-12 现行补充**：上文“a geometry stage that yields nothing gives `fused=None`”
+> 只适用于此前没有成功几何结果的情况。`PipelineRunner._take_geometry()` 在当前阶段的成功
+> geometry Percept 中选择最后一个，后一个成功阶段覆盖前一个阶段的 `fused`；当前阶段没有
+> 成功结果则保留已有 `fused`，错误仍在 `percepts` 中。代码没有“第一个成功结果生效”规则，
+> 也不自动比较方法质量或调用备用工具。只有未执行任何 geometry 阶段且 `options.fuse=true`
+> 时才调用通用 `fusion.fuse()`。`options.fuse=false` 不让 pipeline 跳过显式 geometry
+> 阶段；`multi_view_3d` 自身调用通用融合并遵守该选项，当前 `stereo_3d` / `triview_3d`
+> 则不读取该开关，仍可填充 `fused`。这是顺序执行与结果保留语义，不是自动 fallback。
+> 这里的顺序是 `AppConfig.resolve_pipeline()` 解析后的顺序：它会把启用且已选择的
+> `multi_view_3d` 移到末尾，不一定保留请求列表的原序。因此当其成功时，可能覆盖此前
+> `stereo_3d` / `triview_3d` 的结果；这也不是按质量选择方法。
+
 ## D16 — Prism cross-section is the multi-view visual hull at mid-height
 
 *Conflict:* §9.2/D4 fix the *height search* but not how the cross-section (hence the centroid,
@@ -161,6 +186,11 @@ first passing height (~25× faster, same answer), `table_plane` is honoured by i
 the object and extrusion is along world `+z` (a tilted plane triggers
 `table_plane_tilted`), and single-view geometry assumes `single_view_rough_height_m`
 (default 0.10 m) with `uncertainty_m >= 0.03`.
+
+> **2026-11-12 修订说明（由 D35 替代）**：上文“cone slices at mid-height”和“first passing
+> height”是保留的旧方案。现行 footprint 对平面网格的整根竖直柱体取轮廓约束，柱内采样高度
+> 为 0.15/0.5/0.85；高度取 IoU 峰值。改动解决中高切片将阴影当 footprint、首次过阈值
+> 低估高度的问题。坐标、标定约束及单视角粗略高度的原则继续有效。
 
 ## D17 — An unavailable tool stays HTTP 200 (explicit deviation from appendix A)
 
@@ -321,6 +351,11 @@ and `int(0)` is falsy — an `or`-chain then dropped the expected hash and skipp
 requires an explicit `is not None` and rejects a numeric-looking hash with a message telling
 the operator to quote it in YAML. A test pins both halves: mismatch fails loudly, and an
 unquoted numeric hash is rejected rather than silently ignored.
+
+> **2026-11-12 修订说明（依赖部分由 D33 替代）**：上文“the repository ships no model
+> dependency manifests”不再描述当前仓库。现在每个已部署模型在 `uv_envs/<model>/` 中提交
+> 独立的 `pyproject.toml`、`uv.lock` 和 Python 版本；这些模型框架依赖仍不进入根默认依赖。
+> 部署方使用独立解释器，库通过 backend 调用；本条关于权重路径、hash 和自检的资产契约继续有效。
 
 ## D28 — Real SAM3 verified over the subprocess backend; four upstream traps recorded
 
@@ -544,6 +579,14 @@ Result (`scripts/footprint_accuracy.py`, cube side 10 cm):
 The footprint ratio moved from 1.78–2.93× to 0.65–2.18×. It is still an *upper bound* on a convex
 body — that is what a silhouette hull is — so the remaining excess is expected, not a bug.
 
+> **2026-11-12 审计限制（计算尚未修复）**：上文原文保留为 D35 的方法说明和当时结果，
+> 不代表当前所有轮廓分支或不确定度计算都已正确。本轮另确认两项既有问题：
+> `fusion._hang_cells()` 把世界 XY polygon 直接传给像素 rasterizer，未转换成 grid 像素坐标，
+> hang 候选可能为空或错位；`fusion._lateral_uncertainty()` 使用
+> `norm(hit[0] - origin[0])`，其中 `origin[0]` 是光心的 x 标量，导致结果依赖任意世界原点。
+> 详见[文档修订记录中的 DOC-20261112-01／02](documentation-changes.md)。本轮只更新说明和登记
+> 限制，没有修正这两处计算，也不把现有测试通过解释成它们已经解决。
+
 ## D36 — FoundationStereo is an isolated disparity backend, not a segmenter
 
 The first deployed neural stereo model is FoundationStereo 23-51-11 (research license),
@@ -572,6 +615,12 @@ coordinate consistency, not task-level accuracy or ground-truth object localizat
 The asset manifest pins upstream source, the official checkpoint/config and timm's EdgeNeXt
 backbone. One hash-pinned source patch makes DINO load bundled code instead of fetching a
 remote torch.hub repository. Inference uses the prepared local cache with HF offline mode.
+
+> **2026-11-12 修订说明（部署进度由 D37/D38 更新）**：上文“`ffs`, still unavailable”和
+> “gains no neural model in this deployment”记录首轮 FoundationStereo 部署时的状态。
+> 当前 FFS 已接入 `stereo_3d`，MVSAnywhere HERO 和 DA3-BASE 已接入 `triview_3d` 的 `mvs`
+> 路线，均使用独立运行时。D36 的双目坐标、显式失败和可见表面语义保持有效；本条不表示
+> 已实现目标分割、自动配对或模型间 fallback。
 
 ## D37 — Deploy the remaining three depth models in independent runtimes
 

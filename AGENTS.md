@@ -4,6 +4,9 @@ Derived from `percepta-SPEC.md` §0 / §16. **Read the spec first**; this file o
 things a parallel implementation needs: file ownership, frozen seams, and the decisions we
 took where the spec is ambiguous (spec §19).
 
+Documentation aligned on 2026-11-12 against `534066a`; original wording and reasons are
+recorded in `docs/documentation-changes.md`. Keep the root spec and `docs/spec.md` identical.
+
 ## 1. Current state
 
 The original specification's M0–M5 are complete. The later RoboDojo implementation plan is
@@ -122,11 +125,17 @@ def bbox3d_from_points(points) -> tuple[list[float], list[float]]: ...
 def yaw_from_points(points_xy: np.ndarray) -> float: ...
 
 # src/percepta/fusion.py              (owner: geometry)
-def fuse(percepts: list[Percept], calibration: dict[str, Calibration], context: dict, options: PerceiveOptions | None = None) -> Percept: ...
+def fuse(percepts: list[Percept], calibration: dict[str, Any], context: dict[str, Any], options: PerceiveOptions | None = None) -> Percept | None: ...
 ```
 
 `ToolContext.extras["upstream"]` is how the pipeline hands earlier percepts to later
 tools (`list[Percept]`), per spec §5.3.
+
+Configuration moves `multi_view_3d` to the end. In that resolved order, a later successful
+geometry stage replaces the earlier `fused`; later failures preserve it.
+The pipeline does not skip explicit geometry stages for `options.fuse=False`: `multi_view_3d`
+honours the flag internally, while stereo/triview can still return geometry. This ordering is
+not automatic quality selection or model fallback.
 
 ## 5. Error semantics (spec §16.4, appendix A)
 
@@ -135,16 +144,16 @@ tools (`list[Percept]`), per spec §5.3.
 * Bad request payload → `invalid_request` → HTTP **400**.
 * Unsupported prompt type → Percept `status="invalid_request"` with
   `message="unsupported_prompt"` and `extras["code"]="unsupported_prompt"` (see
-  `docs/decisions.md` D1). Never swallow an exception into `not_found`.
+  `docs/decisions.md` D1), carried by HTTP **200**. Never swallow an exception into `not_found`.
 
 ## 6. Definition of done for any change
 
-1. `python3 -m pytest -q` still green (GPU tests carry `@pytest.mark.gpu`).
-2. `python3 -m ruff check .` clean.
+1. `uv run pytest -q` still green (GPU tests carry `@pytest.mark.gpu`).
+2. `uv run ruff check .` clean.
 3. New behaviour has a test that would fail without it.
 4. Coordinates: docstring states input/output frames and the formula.
 5. No new default dependency; no `import torch` at module import time.
 
-The Lead additionally runs `python3 scripts/e2e_smoke.py`, which starts a real uvicorn server
+The Lead additionally runs `uv run python scripts/e2e_smoke.py`, which starts a real uvicorn server
 on an ephemeral port, drives it through `PerceptaClient`, and asserts the in-process and HTTP
 paths agree pixel-for-pixel (Lead-owned; not part of pytest).

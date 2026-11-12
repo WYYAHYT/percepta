@@ -1,10 +1,17 @@
 # 模型隔离与依赖管理
 
-> 状态：v0.1（设计阶段定稿）。本文档回答一个问题：**当两个感知模型要求互斥的依赖时，
+> 状态：运行时设计与部署记录，现行说明于 **2026-11-12** 对照代码 `534066a` 核对。
+> 本文档回答一个问题：**当两个感知模型要求互斥的依赖时，
 > 怎么在不引入容器的情况下让它们共存。**
 >
 > 相关：`percepta-SPEC.md` §5（工具协议）、`AGENTS.md` §1（uv 工作流）、
-> `docs/decisions.md` D22–D26。
+> `docs/decisions.md` D22–D38。
+>
+> **修订记录（2026-11-12）**：原状态为“v0.1（设计阶段定稿）”。现已存在 SAM3、
+> FoundationStereo、Fast-FoundationStereo、MVSAnywhere HERO、DA3-BASE 五套运行时；
+> §6 的帧布局及 §10 的早期手工安装命令保留为历史，当前部署用 §5/§11/§12 的独立锁定项目。
+> 带日期的说明保留被纠正的原话；本次没有新增模型、调度、RoboDojo 接入或评测功能。
+> 本轮各处原文、修订内容和原因汇总于[文档修订记录](documentation-changes.md)。
 
 ---
 
@@ -44,6 +51,10 @@
 
 结论：**多 venv + 子进程方案在本机完全可行，启动开销可忽略。**
 
+> **2026-11-12 说明**：原“Python 冷启动延迟 0.01 s”“启动开销可忽略”仅指解释器启动，
+> 不包含框架导入、权重读取或 CUDA 初始化。模型加载仍需数秒至数十秒，不能将该数字当作
+> 服务就绪时间；真实 cold/warm 测量见 §10–§12。
+
 ## 4. 三种后端形态
 
 关键设计原则：**工具接口不感知模型跑在哪里。**
@@ -65,7 +76,7 @@ tools/<model>.py
 tools:
   sam3:
     backend: subprocess          # inprocess | subprocess | http
-    python: .venvs/sam3/bin/python   # subprocess 后端
+    python: uv_envs/sam3/.venv/bin/python   # subprocess 后端
     endpoint: http://127.0.0.1:8801  # http 后端
 ```
 
@@ -80,6 +91,13 @@ tools:
 
 **默认路径：先 `inprocess`；`uv lock` 报冲突时切 `subprocess`。**
 
+> **2026-11-12 现行说明**：上文“先 `inprocess`”保留为通用后端的历史选型建议，代码的
+> 通用默认值仍是 `inprocess`；仓库提供的五套本地真实模型配置均使用 `subprocess`，
+> 直接复用各自的独立环境，不需先把模型框架装入根项目试冲突。示例解释器路径由
+> `.venvs/sam3/bin/python` 更新为 `uv_envs/sam3/.venv/bin/python`（D33）。
+> `ModelBackend` 的 `set_image/segment` 形状用于 SAM3；双目和三目使用各自的视差／深度
+> RPC，保持共同的“独立解释器＋常驻 worker”边界，不把所有模型强塞进分割接口。
+
 ## 5. 目录与依赖约定
 
 ### 5.1 每个模型一个隔离环境
@@ -87,40 +105,52 @@ tools:
 ```
 uv_envs/                          # 提交：环境定义（可复现）
 ├── sam3/
-│   ├── pyproject.toml            # 依赖 + CUDA 源（commit）
-│   ├── uv.lock                   # 精确锁定（commit）
-│   └── .venv/                    # 生成物（gitignored）
-└── depth/
-    ├── pyproject.toml
-    ├── uv.lock
-    └── .venv/
+├── foundation-stereo/
+├── fast-foundation-stereo/
+├── mvsanywhere/
+└── da3/
 ```
+
+五个项目均提交 `pyproject.toml`、`uv.lock` 和 `.python-version`；每个项目生成的 `.venv/`
+保持 Git 忽略。后四个源码模型项目还提交 `assets.json`，记录固定源码版本、权重来源与 hash；
+SAM3 的权重／词表配置见 `configs/local-sam3.yaml`。
+
+> **修订记录（2026-11-12）**：原目录树只列 `sam3/` 和示意 `depth/`，未展示已部署的
+> 四个新模型；现改为当前五项目及实际元数据，未创建新的模型目录。
 
 **为什么目录叫 `uv_envs` 而不是 `envs`**：在机器人语境下 "envs" 很容易被理解为仿真环境
 （simulator environments），与 Python 虚拟环境混淆。`uv_envs` 消除了这个歧义。
 
-**为什么环境定义要进版本库**：模型运行时的可复现性和库本身同等重要。锁文件在库外，
-但必须和库一起被评审、被回滚。`pyproject.toml` + `uv.lock` 提交，`.venv/` 忽略。
+**为什么环境定义要进版本库**：模型运行时的可复现性和库本身同等重要。各模型锁与根项目锁
+分开维护，但一起进入版本库、接受评审和回滚。`.venv/` 忽略。
 
 创建方式：
 
 ```bash
 # 一条命令从锁文件重建整个模型环境（约 7 GB，首次下载 CUDA 库较慢）
-uv sync --project uv_envs/sam3 --python 3.10
+uv sync --project uv_envs/sam3 --python 3.10 --locked
 # 产物：uv_envs/sam3/.venv/，配置里指向 uv_envs/sam3/.venv/bin/python
 ```
 
-### 5.2 库的边界：不管模型依赖
+> **修订记录（2026-11-12）**：原“锁文件在库外”指与根项目分离，不表示不纳入此仓库；
+> 原重建命令没有 `--locked`，现显式要求使用既有锁，避免重建时隐式更新依赖解析。
 
-**本库不管理任何模型框架的依赖。** 根 `pyproject.toml` 里**没有** `sam3` 之类的 extra ——
-它曾经有过，但那样构造出来必然是坏的：从 PyPI 解析 `torch` 得到的是 CPU 版（无 `+cu128`），
-且缺少 sam3 未声明却 import 的 `psutil`。模型运行时需要自己的索引和自己的锁文件，
-因此是 `uv_envs/<model>/` 下的独立项目（决策 D33）。
+### 5.2 库的边界：根项目与模型运行时分别锁定
+
+根 `pyproject.toml` 的默认依赖**不包含任何模型框架**，也**没有** `sam3` extra。
+早期 extra 未能复现本机验证过的 CUDA 运行时，且缺少 sam3 未声明却实际 import 的 `psutil`。
+模型运行时需要自己的版本、索引和锁文件，因此是 `uv_envs/<model>/` 下的独立项目（决策 D33）。
 
 注意库**仍然**约束模型**权重**的路径与完整性 —— 这是两回事，见 §5.4。
 
-理由：一旦库开始维护模型依赖清单，它就得跟着每个上游模型的版本节奏走，
-必然腐化；而且不同部署的 CUDA / 驱动组合不同，库无法给出通用答案。
+仓库维护的是每个已部署模型单独的、经过验证的运行时清单，不是一个适用于所有模型和
+CUDA / 驱动组合的根依赖集合。重建这些环境由部署方执行，库通过配置选择解释器。
+
+> **修订记录（2026-11-12）**：原题“库的边界：不管模型依赖”、原文“本库不管理任何模型
+> 框架的依赖”“一旦库开始维护模型依赖清单……必然腐化”表述过宽；D33 已明确在仓库内
+> 提交各模型的独立 `pyproject.toml` / `uv.lock`。这里澄清维护位置和执行边界，资产契约不变。
+> 原“那样构造出来必然是坏的：从 PyPI 解析 `torch` 得到的是 CPU 版”记录早期环境的问题，
+> 不应作为所有平台的 PyPI 轮子都只有 CPU 构建的断言；现行要求是使用已验证的独立 CUDA 锁。
 
 库只保证三件事：
 
@@ -130,15 +160,19 @@ uv sync --project uv_envs/sam3 --python 3.10
 
 ### 5.3 主环境保持干净
 
-主环境（`.venv`）**永远只装 `pyproject.toml` 的默认依赖 + `dev` 组**，
-不含任何模型框架。这条规则保证主环境能在无 GPU 机器上安装并跑全量测试。
+默认 `uv sync` 在主环境（`.venv`）安装根默认依赖和 `dev` 组；可按用途显式添加
+`service` / `stereo` extra，模型框架仍留在独立运行时。默认测试可以在无 GPU 的机器运行，
+OpenCV 几何测试需另装 `stereo` extra。
+
+> **修订记录（2026-11-12）**：原“永远只装……默认依赖 + `dev` 组”漏掉合法的可选
+> `stereo` / `service` 安装，原“全量测试”也未区分需要 OpenCV 或真实模型的测试。
 
 模型依赖由部署方装进 `uv_envs/<model>/.venv`（由该目录下的 `uv.lock` 生成）或任意虚拟环境，
 然后通过 `tools.<name>.python` 指过去。
 
 ### 5.4 模型资产契约（库负责的部分）
 
-依赖不管，但**资产要管** —— 因为权重的错误是静默的：截断或版本错误的文件
+根项目与各模型依赖分别锁定；库还校验**资产的路径与完整性**，因为截断或版本错误的权重
 可以"成功加载"，然后安静地输出错的结果。
 
 配置形态：
@@ -146,7 +180,7 @@ uv sync --project uv_envs/sam3 --python 3.10
 ```yaml
 tools:
   sam3:
-    checkpoint: /models/sam3.pt        # 位置：绝不在仓库里
+    checkpoint: /models/sam3.pt        # 可位于仓库外或 ignored checkpoints/；永不 Git 跟踪
     checkpoint_sha256: "abc123…"       # 可选：64 位十六进制，YAML 里必须加引号
     verify_weights: if-declared        # if-declared | always | never
 ```
@@ -155,9 +189,14 @@ tools:
 
 | 模式 | 行为 | 用途 |
 |---|---|---|
-| `if-declared`（默认） | 声明了哈希就校验，否则只记录 | 探索期可用，生产配置天然安全 |
+| `if-declared`（默认） | 声明了哈希就校验，否则只记录 | 探索期可用；仅声明期望哈希后才比对 |
 | `always` | 本地文件没有声明哈希就拒绝加载 | CI / 生产 |
 | `never` | 完全不校验 | 超大权重 + 慢磁盘的逃生门 |
+
+> **修订记录（2026-11-12）**：原“依赖不管”已改为分别锁定的边界；checkpoint 注释原
+> “绝不在仓库里”应是永不纳入 Git 跟踪，允许置于仓库内被忽略的 `checkpoints/`。
+> 原 `if-declared` 用途“生产配置天然安全”保证过强：未声明期望 hash 时只记录、不比对，
+> 不能据此声称完整性已验证。
 
 启动前自检：
 
@@ -171,7 +210,13 @@ percepta models check --config configs/example.yaml
 注意：YAML 会把纯数字的哈希解析成整数（`int(0)` 为假值）。
 库对此**报错而非静默跳过**，并在消息里提示加引号。
 
-## 6. 子进程通信协议（草案）
+## 6. 子进程通信协议（历史草案，非当前逐字节规范）
+
+> **修订记录（2026-11-12）**：原标题为“子进程通信协议（草案）”。下列生命周期图和帧布局
+> 保留原文，仅解释设计意图，不应照抄实现。现行编码以
+> `src/percepta/backends/{protocol,stereo_protocol,multiview_protocol}.py` 为准：分别传输
+> SAM3 的图像／提示／分割结果、双目 RGB／视差、三目 RGB＋标定／米制深度，均带外层长度
+> 分帧。双目与三目 RPC 另限制像素／metadata 大小，实施启动及读写 deadline；stdout 仅用于协议。
 
 ### 6.1 为什么不用 JSON
 
@@ -255,17 +300,25 @@ worker 启动时由主进程注入 `CUDA_VISIBLE_DEVICES`。好处：
 
 单卡场景：所有 worker 共享 `"0"`，由服务层的 per-tool 锁（spec §11.2）串行化。
 
+> **2026-11-12 更正**：原“所有 worker 共享 `0`，由……per-tool 锁……串行化”不能保证
+> 不同工具的 worker 互斥；锁只串行同一个工具，没有跨工具的全局 GPU 调度器。部署方需安排
+> 卡与显存预算。`cuda_visible_devices: ""` 仅继承环境，不自动选择空闲 GPU（D32）。
+
 ## 8. 加一个新模型的检查清单
 
-1. **判断冲突风险**：新模型要求的 `torch`/`numpy` 主版本与现有模型是否相容？
-   - 相容 → 走 extra，`inprocess` 后端
-   - 冲突 → 建独立 venv，`subprocess` 后端
-2. **依赖由部署方装进独立环境**，不写进本仓库的 pyproject
+1. **为模型建立独立项目**：在 `uv_envs/<model>/` 提交 `pyproject.toml`、官方源生成的
+   `uv.lock` 和 Python 版本，保持根默认依赖不变。
+2. **依赖由部署方重建**：运行 `uv sync --project uv_envs/<model> --locked`；外部自管环境
+   仍可通过解释器路径接入。
 3. **在 `configs/*.yaml` 里声明 backend、python 路径与 `cuda_visible_devices`**
 4. **工具实现只依赖 backend 抽象**，不直接 `import torch`
 5. **写一个 fake backend**，让逻辑能在无 GPU 环境测试（见 `backends/reference.py`）
 6. **权重走配置注入**：`checkpoint` + `checkpoint_sha256`，绝不进 git
 7. **跑 `percepta models check`**，并在 `/healthz` 里如实报告未装模型为 `error`
+
+> **修订记录（2026-11-12）**：原第 1 项“相容 → 走 extra，`inprocess` 后端”、第 2 项
+> “不写进本仓库的 pyproject”已被 D33 的独立项目约定替代；禁止增加的是根默认模型依赖，
+> 不是禁止提交 `uv_envs/<model>/pyproject.toml`。`inprocess` 仍是外部部署可选的通用后端。
 
 ## 9. 未决问题
 
@@ -278,6 +331,11 @@ worker 启动时由主进程注入 `CUDA_VISIBLE_DEVICES`。好处：
 4. **worker 的健康监控**：主进程如何发现 worker 卡死（而非崩溃）？需要心跳或超时。
    当前依赖请求级超时（spec §6），可能不够。
 
+> **2026-11-12 状态更新**：上述条目保留早期问题原文。常驻复用已实现；按需空闲回收、共享
+> 内存、prompt 批处理没有在本轮新增。第 4 项原“当前依赖请求级超时”不再概括全部模型：
+> 神经双目／三目的 RPC 有启动和管道 IO deadline、故障回收，以及不等待推理锁的健康快照；
+> 无需等待下一次推理即可识别 worker 退出。没有实现独立心跳或统一的多模型调度器。
+
 ---
 
 ## 10. 真实 SAM3 实测记录（v0.1，本机 H20）
@@ -285,6 +343,10 @@ worker 启动时由主进程注入 `CUDA_VISIBLE_DEVICES`。好处：
 这一节记录**真正把 SAM3 跑起来**之后才知道的事。前面几节是设计，这一节是事实。
 
 ### 10.1 环境实测
+
+> **2026-11-12 历史标记**：下列 `.venvs/sam3`、`uv pip install` 命令是首次实测日志，
+> 保留其原文供追溯；当前重建入口是 `uv sync --project uv_envs/sam3 --locked`，
+> 不应通过这些历史命令重新生成锁文件。
 
 ```bash
 uv venv .venvs/sam3 -p 3.10

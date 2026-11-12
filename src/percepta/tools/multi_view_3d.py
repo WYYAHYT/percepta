@@ -46,7 +46,16 @@ class MultiView3DTool(BaseTool):
     kind = "geometry"
 
     def capabilities(self) -> ToolCapabilities:
-        """Geometry only: no prompts, no masks/boxes/points; needs depth and many views."""
+        """Describe geometry support, including optional depth and multiple calibrated views.
+
+        Returns:
+            Capabilities for consuming upstream masks; this tool produces no masks or boxes.
+            A single calibrated view can produce rough geometry when table information exists.
+
+        Example:
+            >>> MultiView3DTool().capabilities().geometry
+            True
+        """
         return ToolCapabilities(
             kind="geometry",
             prompts=set(),

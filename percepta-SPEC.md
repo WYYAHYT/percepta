@@ -1,12 +1,21 @@
-# percepta — 功能规格与开发说明书（v0.1 draft）
+# percepta — 功能规格与开发说明书（v0.3.0-doc.1，2026-11-12）
 
 > 本文档是给**实现者（人或 Agent）**看的规格书，不是用户手册。目标是把"一套可插拔的机器人感知层"定义到**接口无歧义、验收可自动判定**的程度。实现时不要自行发明字段、端点或语义；确需变更，先改本文档并升版本。
+
+> **实现对齐时间：2026-11-12（UTC+08:00）；代码基线：`534066a`。** 包版本仍为
+> `0.3.0`，schema 仍为 `percepta/v1`；本次只修订说明，不新增接口或算法。根目录本文是主本，
+> `docs/spec.md` 是内容相同的镜像。修订前原文、修改原因及逐项对照见
+> `docs/documentation-changes.md`；历史决策保留，已被替代的条目另加说明。
+>
+> 原始 M0–M5 已完成。SAM3 及四个双目／三目模型均已部署，后四者属于 `Unreleased`；
+> 后来的扩展方案包含更多设计任务，不代表当前全部已实现。当前调用方式见 `README.md`，
+> 部署证据与限制见 `docs/model-isolation.md`，决策沿革见 `docs/decisions.md`。
 
 ---
 
 ## 0. 怎么用这份文档（给 Agent）
 
-1. 先读 §1–§5（目标、数据模型、坐标约定），再读你要负责的模块与 §16 验收。
+1. 先读 §1–§5（目标、数据模型、坐标约定），再读你要负责的模块与 §14 验收、§16 协作规约。
 2. **§4/§5/§6/§7 是冻结接口**：字段名、枚举值、JSON 形状、HTTP 路径不得改动；新增只能"加可选字段"，且需在 §18 记录。
 3. 任何"模型相关"的实现都必须能被 **fake 工具**替换，保证 CI 无 GPU 可跑。
 4. 完成定义（DoD）：代码 + 单测 + 验收场景通过 + 文档更新 + 不新增未声明的第三方依赖。
@@ -21,18 +30,18 @@
 `percepta` 是**感知层（observation layer）**：把多个感知模型（开放词表分割、检测、深度、VLM 定位、几何）统一成**同一种可序列化的观测对象**，让 Agent Policy（代码策略/VLA/工具链）用一致的方式消费，并支持：
 
 - 一张或多张 RGB（多相机）+ 可选深度；
-- 文本 / 框 / 点 三种提示；
+- schema 表达文本 / 框 / 点三种提示；具体支持范围由工具声明，当前 SAM3 只支持文本 / 框；
 - 输出实例 mask、框、分数、2D 统计；
 - 用标定做**多视角几何 → 3D 位置/尺寸/朝向**；
 - 动作前后观测对比（验证/证据）；
 - 工具插件化：SAM3 只是默认实现，可替换/叠加（检测器、深度、VLM grounding）。
 - 既可进程内调用（Python SDK），也可作为 loopback HTTP 服务（多机部署）。
 
-### 1.2 非目标（v0.1 明确不做）
+### 1.2 非目标（当前范围）
 
 - 不做规划/控制/VLA 推理；不输出动作。
 - 不做训练/微调。
-- 不做视频跟踪与跨帧实例 ID（可在 v0.2 加）。
+- 不做视频跟踪与跨帧实例 ID（保留为未来扩展）。
 - 不做通用 VLM 对话；VLM 只作为"grounding 工具"。
 - 不做鉴权体系/TLS/公网暴露（loopback + 可选共享 token 即可）。
 - 不内置相机驱动/仿真接口；输入是图像/标定/上下文。
@@ -118,13 +127,13 @@ class Mask(BaseModel):
     data: str | None = None                # encoding=png 时 base64 PNG
 
 class Observation(BaseModel):
-    object_id: str                   # 稳定 id：sha1(percept_id + index)
+    object_id: str                   # sha1(f"{percept_id}:{index}")；仅本 Percept 生命周期内稳定
     score: float
-    box_xyxy: list[float] | None     # 像素 [x0, y0, x1, y1]
-    mask: Mask | None
-    area_px: int | None
-    centroid_uv: list[float] | None  # 像素 [u, v]
-    label: str | None                # 产生它的概念（text prompt 或 detector label）
+    box_xyxy: list[float] | None = None  # 像素 [x0, y0, x1, y1]
+    mask: Mask | None = None
+    area_px: int | None = None
+    centroid_uv: list[float] | None = None  # 像素 [u, v]
+    label: str | None = None             # text prompt 或 detector label
     attributes: dict[str, float | str | bool] = {}
 
 class Geometry(BaseModel):
@@ -136,6 +145,10 @@ class Geometry(BaseModel):
     yaw_rad: float | None = None
     uncertainty_m: float | None = None
     views_used: int | None = None
+    lateral_uncertainty_m: float | None = None  # D35：横向边缘误差估计
+    height_uncertainty_m: float | None = None   # D35：顶部高度误差估计
+    view_disagreement_m: float | None = None    # D35：视角拟合分歧
+    method: str | None = None                  # prism / hang / single_view / stereo_* / triview_* 等
 
 class Provenance(BaseModel):
     tool: str
@@ -147,8 +160,8 @@ class Provenance(BaseModel):
     camera: str | None = None
     image_sha256: dict[str, str] = {}        # camera -> sha256
     calibration_id: str | None = None
-    latency_ms: float
-    created_at: datetime
+    latency_ms: float = 0.0
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     cache_hit: bool = False
 
 class Percept(BaseModel):
@@ -168,7 +181,7 @@ class Percept(BaseModel):
 ```python
 class PerceiveOptions(BaseModel):
     tools: list[str] | None = None   # None = 默认 pipeline
-    fuse: bool = True                # 多视角 -> 3D
+    fuse: bool = True                # 无显式 geometry 阶段时是否补充调用 fusion.fuse，见 §5.3
     masks: MaskEncoding = "rle"
     min_score: float = 0.2
     top_k: int = 1
@@ -186,7 +199,7 @@ class PerceiveRequest(BaseModel):
 class PerceiveResponse(BaseModel):
     request_id: str
     percepts: list[Percept]          # 每 camera×prompt×tool 一条
-    fused: Percept | None = None     # options.fuse 且几何可用时
+    fused: Percept | None = None     # 显式 geometry 输出，或 options.fuse 启用的补充融合结果
     timings_ms: dict[str, float] = {}
     warnings: list[str] = []
 ```
@@ -213,8 +226,8 @@ class PerceiveResponse(BaseModel):
 1. **像素坐标**：原点左上；`u` 向右（列），`v` 向下（行）；`point=[u,v]`；`box=[x0,y0,x1,y1]` 浮点像素，`x1/y1` 为开区间外沿。
 2. **相机坐标**：OpenCV 约定（x 右、y 下、z 向前）。
 3. **世界坐标**：右手系，米；由 `T_world_cam` 唯一确定（**camera→world**，即 `p_world = T_world_cam @ p_cam_h`）。
-4. **内参**：`K` 3x3，像素单位；不做畸变（v0.1 假定已校正）。
-5. **深度**：`DepthRef` 为 float32 米，与 RGB 同分辨率；可选。没有深度时几何只能靠轮廓/平面假设。
+4. **内参**：`K` 3x3，像素单位；输入不含镜头畸变参数，假定已去畸变。双目工具仍须按 K/T 做极线校正。
+5. **深度**：`DepthRef` 为 float32 米，与 RGB 同分辨率；可选。`multi_view_3d` 无深度时使用轮廓/平面假设；`stereo_3d` / `triview_3d` 可从标定 RGB 估计深度。
 6. **尺寸/分辨率校验**：图像 `(H,W)` 必须与 `Calibration.height/width` 一致，否则 `invalid_request`。
 7. **mask 尺寸**：与原图同 `(H,W)`；`area_px = sum(mask)`；`centroid_uv` 为 mask 像素均值。
 
@@ -229,24 +242,26 @@ RLE 规范见附录 B。
 ```python
 class ToolCapabilities(BaseModel):
     kind: ToolKind
-    prompts: set[PromptType]
-    masks: bool
-    boxes: bool
-    points: bool
-    depth: bool
-    multi_view: bool
-    geometry: bool
+    prompts: set[PromptType] = set()  # 空集合表示 prompt 无关（D18）
+    masks: bool = False
+    boxes: bool = False
+    points: bool = False
+    depth: bool = False
+    multi_view: bool = False
+    geometry: bool = False
 
 class ToolContext(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False, arbitrary_types_allowed=True)
     request_id: str
     images: dict[str, np.ndarray]        # 已解码 RGB uint8 (H,W,3)
-    calibration: dict[str, Calibration]
-    context: dict[str, Any]
-    options: PerceiveOptions
-    logger: Any
-    cache: Any
+    calibration: dict[str, Calibration] = {}
+    context: dict[str, Any] = {}
+    options: PerceiveOptions = PerceiveOptions()
+    logger: Any = None
+    cache: Any = None
+    extras: dict[str, Any] = {}          # D2：pipeline 状态，upstream 为上游 Percept 列表
 
-class PerceptionTool(Protocol):
+class PerceptionTool(abc.ABC):
     name: str
     version: str
     api_version: Literal["percepta/tool/v1"] = "percepta/tool/v1"
@@ -266,17 +281,27 @@ class PerceptionTool(Protocol):
 
 - 默认 pipeline：`[<默认 segmenter>, multi_view_3d]`（`multi_view_3d` 是内置 geometry 工具）。
 - 工具顺序即数据流：前一个工具的 `Percept` 作为后一个的输入（通过 `ctx.extras["upstream"]` 传递）。
-- v0.1 只要求**串行**；并行多相机由服务层调度（每相机独立调用工具，工具内部须线程安全或由服务层加锁）。
+- 每请求每工具调用一次，带全部相机；工具内部遍历或联合处理视角，推理由 per-tool 锁串行化。
+- `kind="geometry"` 阶段中的最后一条 `status="ok"` Percept 直接成为 `response.fused`，该条不再进入 `percepts`，也不二次调用 `fusion.fuse()`。
+- 配置解析会移除禁用工具，并把 `multi_view_3d` 移到末尾；其它工具保留请求顺序。多个 geometry 阶段按此解析顺序执行，**后一个成功结果覆盖前一个**；后一个失败时保留已有成功结果，失败 Percept 仍可见。这不是自动质量选择或模型回退策略。
+- `options.fuse=False` 关闭补充融合，但 pipeline 不会跳过显式 geometry 工具：`multi_view_3d` 内部遵守此选项返回空，`stereo_3d` / `triview_3d` 仍可填写 `fused`。要统一关闭某工具须从工具列表移除。
 
-### 5.4 必做工具（v0.1）
+### 5.4 当前工具与模型
 
 | 工具 | 类型 | 要求 |
 |---|---|---|
 | `fake` | fake | 纯 numpy 合成：按"颜色阈值 + 连通域"输出 mask/box，用于 CI；无外部依赖 |
 | `sam3` | segmenter | 官方 `sam3` 包；支持 text / box；输出 mask/box/score；加载一次、模型 sha256 入 provenance |
 | `multi_view_3d` | geometry | 多视角 mask + 标定 → Geometry（见 §9） |
+| `stereo_3d` | geometry | 恰好两路标定 RGB；CPU SGBM、FoundationStereo 或 Fast-FoundationStereo；可选原左图 mask |
+| `triview_3d` | geometry | 恰好三路标定 RGB；多组 SGBM 融合，或原生 MVSAnywhere HERO / DA3-BASE |
 
-可选（v0.2）：`yoloe`/`omdet`（detector，box 提示来源）、`depth_anything`（单目深度）、`vlm_grounding`（VLM 出框）。
+双目只支持当前实现允许的水平左右顺序；反向/竖直对显式拒绝。神经三目要求同尺寸三图和不同相机中心，
+DA3 还要求中心非共线。FFS 官方剪枝权重的 `max_disp` 上限为 416 像素。参数与运行命令见部署文档。
+这些神经几何工具描述场景可见表面，文本提示不会分割目标；没有自动 SAM3 mask 接线、对象补全或自动模型回退。
+
+未来可选：`yoloe`/`omdet`（detector）、独立单目深度工具、`vlm_grounding`。
+DA3 已作为三目后端部署，不表示独立单目工具也已实现；`adaptive_3d` 仍为设计。
 
 ---
 
@@ -295,7 +320,7 @@ class PerceptionTool(Protocol):
 | GET | `/metrics` | 可选 Prometheus 文本 |
 
 - 限制：请求体 ≤ `max_body_bytes`（默认 32MiB）；单请求超时 `timeout_ms`；进程内队列 `max_queue`（默认 8），满则 **503 busy**。
-- 错误映射（HTTP）：400 invalid_request / 401 unauthorized / 413 payload_too_large / 503 busy / 504 timeout / 500 internal；**`not_found` 是 Percept 的 status，不是 HTTP 错误**。
+- 错误映射（HTTP）：400 invalid_request / 401 unauthorized / 413 payload_too_large / 503 busy / 504 timeout / 500 internal；`not_found`、工具不可用以及工具拒绝某个 prompt 均通过 HTTP 200 的 Percept 状态表达（附录 A）。
 - 可选鉴权：`Authorization: Bearer $PERCEPTA_TOKEN`（未设 token 则不校验）。
 - 响应必须可 JSON 序列化；不允许 NaN/Inf（几何缺失用 null）。
 
@@ -317,7 +342,8 @@ class PerceptaClient:
 
 - `images` 值可为 numpy RGB 或本地路径；客户端负责 PNG 编码与 base64。
 - 客户端对 503/5xx 做有界重试（默认 2 次，指数退避）；`not_found` 不重试。
-- 客户端提供 `perceive_local()`：同进程直接调 registry（不经过 HTTP），用于单机低延迟。
+- 客户端提供 `perceive_local()`：同进程调用共享 `PipelineRunner`，不经过 HTTP；工具自身仍可使用独立模型子进程。
+- `wait_until_ready(timeout_s=120.0, interval_s=0.25, *, warm=True)` 等待服务可访问和 warmup 结束；预热失败也算结束，须另查 `tools[].status` 与 `warmup_state()`。双目/三目配置关闭通用单图预热，需使用对应 smoke 核实真实推理就绪。
 
 CLI：
 
@@ -326,6 +352,7 @@ percepta serve --config config.yaml
 percepta perceive --image cam_head=img.png --prompt text:bottle [--calib calib.json] [--json]
 percepta tools list
 percepta probe [--config config.yaml]
+percepta models check --config config.yaml [--no-hash] [--json]
 ```
 
 ---
@@ -350,20 +377,25 @@ percepta probe [--config config.yaml]
 
 输入：同一次请求的多相机 `Percept`（mask + box + score）+ `Calibration`。
 
-算法（v0.1，按优先级）：
+算法（当前实现，D35；各路径失败后尝试下一条）：
 
 1. **有深度**：取 mask 内深度像素 → 反投影到相机 → 世界点云 → 中位数中心、分位数包围盒、顶部 z、PCA/最小外接矩形得 yaw。
-2. **无深度、多视角**：轮廓几何（silhouette/prism）：
-   - 对每个相机，把 mask 的轮廓射线打到"桌面平面"（`context["table_plane"]: [a,b,c,d]` 或默认 z=table_z）上；
-   - 在候选高度 h 上，把"以该轮廓为投影的立体"重新投影到其它相机，与其它 mask 做 IoU/F1 匹配；
-   - 取匹配最好且高度最小的解 → 中心/顶部 z/半径；`views_used` 记录参与视角数；`uncertainty_m` 由视角数与高度区间估计。
-3. **单视角无深度**：只返回 2D + 粗略高度（若 `table_plane` 可用），`geometry.uncertainty_m` ≥ 0.03；否则 `Geometry` 为 null 且 `warnings += ["geometry_unavailable"]`。
+2. **至少两路可用 mask**：采样轮廓几何（silhouette/prism）：
+   - 每相机选最高分的可用 mask；`context["table_plane"]: [a,b,c,d]` 优先于 `table_z`。多视角缺省桌高为 0 m，并标注 `table_z_assumed`。
+   - 世界 XY 网格中，一个底面单元仅在从桌面到候选顶部的采样柱体都投进所有 mask 时保留；不是取中高平面的投影阴影。
+   - 扫描候选高度，对保留柱体重新投影并计算跨视角 IoU，取完整曲线的**最高分高度**；并列取较低者。默认最大高度 0.5 m、目标步长 0.01 m，实际采样数有上下限。
+   - `prism_iou_threshold` 默认 0.5，仅决定是否标注 `geometry_low_confidence`，不用于首次达标即停止。
+   - 当前还尝试 `hang` 候选，并仅在重投影分数超过 prism 一定幅度时选用；该候选有已确认的坐标限制，见 `docs/documentation-changes.md` 的待修代码问题，不能视作完整对象补全。
+   - 输出中心、包围盒、顶部 z、yaw 及分轴不确定度估计；`uncertainty_m` 取横向和高度估计的较大值，视角分歧独立报告。
+3. **最高分单视角兜底**：需要调用方明确提供可用 `table_plane` / `table_z`；否则不输出 Geometry。高度为粗略估计，`views_used=1`，当前高度不确定度至少 0.05 m；不是多视角测量结果。
 
 约束：
 
 - 无 `calibration` 时**禁止**输出 `Geometry`（不得用像素猜米）。
 - 所有几何结果必须带 `frame="world"` 与 `uncertainty_m`。
 - 至少 2 视角才允许 `views_used>=2`；单视角必须显式标注。
+- 轮廓法沿世界 +Z 挤出，假定桌面近水平；倾斜 `table_plane` 只用于估计对象处桌高，不构成任意斜面重建。
+- 不确定度是启发式估计，不是经过标定的误差界；本轮审计另记录了横向估计的世界原点依赖问题。
 
 ---
 
@@ -420,22 +452,30 @@ logging:
   json: true
 metrics:
   enabled: false
+warmup:
+  enabled: true              # 通用单图预热；双目/三目配置关闭并改用对应 smoke
+  height: 480
+  width: 640
+  prompt: object
 ```
 
 ### 11.2 并发
 
 - 每工具一把进程内锁（模型推理串行）；服务层 `BoundedSemaphore` 控制排队；超时/满 → 503/504。
 - 多 GPU：一个进程绑一张卡（`CUDA_VISIBLE_DEVICES`）；多实例多端口。
+- 子进程模型可各自设置 `cuda_visible_devices`；空字符串继承进程环境，不会自动选择空闲显卡。当前没有自动多 worker 调度或崩溃后重启。
 
 ### 11.3 可观测
 
 - 结构化日志（JSON）：`request_id, tool, camera, status, latency_ms, cache_hit`。
 - 指标（可选）：`percepta_requests_total{tool,status}`、`percepta_latency_ms{tool}`、`percepta_inflight`、`percepta_cache_hits_total`。
 - `/healthz` 必须反映工具加载状态（`ok|loading|error`）。
+- 未启用工具不列出；未加载的 `lazy` 在健康接口映射为 `ok`，所以健康可访问不等于真实模型已热态。常驻 worker 退出或失败会更新为 `error`（D38）。
 
 ### 11.4 缓存
 
 - key：`sha256(image) + prompt + tool + options(相关子集)`；LRU + TTL；命中时 `provenance.cache_hit=true`（不改变结果内容）。
+- options 只包含 `masks` / `min_score` / `top_k`；不包含 context、标定、模型配置。缓存仅用于无上游结果的阶段。依赖这些未入 key 数据的几何工具应关闭缓存，当前神经双目/三目配置均如此。
 
 ---
 
@@ -444,11 +484,12 @@ metrics:
 - 默认只绑 loopback；跨机用 SSH 隧道；文档给出 `ssh -N -L` 与 systemd 常驻写法。
 - 可选 bearer token；不实现 TLS。
 - 请求体大小、超时、队列上限必须生效。
-- 不接收文件路径（只收内联图像）；不做 pickle/任意反序列化。
+- 请求不接收源码、模型文件路径或 pickle，只收内联图像、标定和上下文。模型 worker 可在校验固定官方资产 SHA 后加载可信权重；FFS 的官方完整模型包含 pickle，不允许请求指定或替换其来源。
 - 仓库许可建议 **Apache-2.0**；**不得 vendor** 任何模型权重或违反上游许可的代码。
   - SAM3 权重：SAM License（gated），运行时由用户提供路径。
   - Ultralytics 系（YOLOE/YOLO-World）：AGPL-3.0，作为**可选工具**，默认不启用、不随仓库分发。
   - GroundingDINO/OWLv2/OmDet-Turbo/SAM2：Apache-2.0（以各自仓库为准）。
+  - 当前 FoundationStereo、Fast-FoundationStereo、MVSAnywhere HERO 权重限非商业研究；DA3-BASE 源码与权重为 Apache-2.0。
 
 ---
 
@@ -456,28 +497,36 @@ metrics:
 
 ```
 percepta/
-├── pyproject.toml            # hatchling; extras: [service], [sam3], [dev]
+├── pyproject.toml            # hatchling; extras: service / stereo；默认 dev 依赖组
+├── uv.lock / .python-version # 主库锁与 Python 3.10
 ├── README.md
 ├── AGENTS.md                 # 从本文档 §0/§18 派生的协作规约
 ├── configs/example.yaml
-├── docs/spec.md              # 本文档
+├── docs/spec.md              # 根 percepta-SPEC.md 的同步镜像
+├── docs/documentation-changes.md # 带时间、原文与原因的文档修订记录
+├── uv_envs/<model>/          # SAM3 与四个神经深度模型各自的项目、锁和资产清单
+├── scripts/                 # 资产 bootstrap、模型 smoke、e2e 与锁检查
 ├── src/percepta/
 │   ├── __init__.py           # 公共 API 导出
 │   ├── schema.py             # §3 全部模型
 │   ├── masks.py              # RLE 编解码、IoU、面积/质心
 │   ├── geometry.py           # project/unproject、平面、包围盒、PCA/yaw
 │   ├── fusion.py             # §9 multi_view_3d
+│   ├── hull.py               # 世界 XY 网格与采样柱体轮廓约束
 │   ├── verification.py       # §10
 │   ├── prompts.py            # §8
 │   ├── registry.py           # entry points 加载、能力校验
-│   ├── config.py             # pydantic-settings + YAML
+│   ├── config.py             # pydantic + PyYAML（无 pydantic-settings）
+│   ├── pipeline.py           # HTTP / SDK 共用编排
+│   ├── warmup.py / weights.py # 预热与模型资产检查
 │   ├── cache.py
 │   ├── service/{app.py,routes.py,metrics.py,logging.py}
 │   ├── client.py             # PerceptaClient + perceive_local
 │   ├── cli.py
-│   └── tools/{base.py,fake.py,sam3.py,multi_view_3d.py}
+│   └── tools/{base,fake,sam3,multi_view_3d,stereo_3d,triview_3d}.py
 ├── src/percepta/backends/     # 模型跑在哪：inprocess / subprocess / http（v0.1.3 新增）
-│   └── {base,protocol,inprocess,subprocess_backend,http_backend,worker,reference}.py
+│   ├── {base,protocol,inprocess,subprocess_backend,http_backend,worker,reference}.py
+│   └── stereo / multiview 协议、常驻 worker 与各模型适配器
 ├── tests/
 │   ├── unit/                 # schema/masks/geometry/prompts/verification/backends/weights
 │   ├── contract/             # HTTP 契约（fake 工具，无 GPU）
@@ -485,11 +534,15 @@ percepta/
 └── systemd/perceptad.service
 ```
 
-依赖（v0.1，最小集）：`pydantic>=2`、`numpy`、`pillow`、`pyyaml`、`fastapi`、`uvicorn`、`pytest`、`httpx`（测试）；`sam3` 走 extras（含 torch）。**不得**把 torch 设为默认依赖。
+默认依赖仅为 `pydantic>=2`、`numpy>=1.26,<2.4`、`pillow>=10`、`pyyaml>=6`。
+`service` extra 提供 FastAPI/uvicorn，`stereo` extra 提供 OpenCV；pytest/httpx/ruff 以及服务测试依赖位于默认安装的 `dev` 依赖组。**不得**把 torch 或模型框架设为默认依赖，也没有根 `sam3` extra。
 
-依赖由 **uv** 管理（`uv.lock` + `.python-version`，见 D22）。**本仓库不维护任何模型框架的依赖清单**：
-模型依赖由部署方装进独立虚拟环境，通过 `tools.<name>.backend` / `python` 指过去（见 `docs/model-isolation.md`）。
-库只约束模型**权重的路径与完整性**（`checkpoint` / `checkpoint_sha256` / `verify_weights`，D27）。
+依赖由 **uv** 管理（D22）。D33 已替代 D27 的“不维护模型依赖清单”：本仓库在
+`uv_envs/sam3`、`foundation-stereo`、`fast-foundation-stereo`、`mvsanywhere`、`da3`
+维护彼此独立的 `pyproject.toml` / `uv.lock` / `.python-version`；后四者另有 `assets.json`。
+主库用 `tools.<name>.python` 指向对应环境，框架依赖不进入根锁的默认安装。
+锁由官方源生成，CI 先检查可移植性，再检查根和全部模型锁是否与项目一致（D34）。
+权重、模型源码和 `.venv/` 不提交；路径、哈希及部署命令见 `docs/model-isolation.md`。
 
 ---
 
@@ -515,19 +568,22 @@ percepta/
 
 | 里程碑 | 内容 | DoD |
 |---|---|---|
-| **M0 骨架** | pyproject、schema.py、masks.py、registry、fake 工具、pytest 骨架 | S2 绿；`pip install -e .` 可用 |
+| **M0 骨架** | pyproject、schema.py、masks.py、registry、fake 工具、pytest 骨架 | S2 绿；`uv sync` 可用 |
 | **M1 契约** | service（FastAPI）+ client + CLI + 错误映射 | S1/S4 绿；`percepta serve` 可起 |
 | **M2 SAM3** | `tools/sam3.py`（text/box）、provenance、加载/释放、warmup | S9 手动通过；无 GPU 环境不导入 |
 | **M3 几何** | geometry.py + fusion.py（深度 & 轮廓） | S3/S5 绿 |
 | **M4 验证/缓存** | verification.py、cache.py、指标、日志 | S6/S7 绿 |
-| **M5 加固** | 队列/超时/大小限制、Docker、systemd、文档、性能基线 | 全部验收绿；README 有部署示例 |
+| **M5 加固** | 队列/超时/大小限制、独立模型进程、systemd、文档、性能基线 | 原始验收完成；README 有部署示例；Docker 已由 D27/D33 调整出交付范围 |
+
+以上是原始里程碑，已完成；扩展方案复用了 M0–M5 编号，不能混为一组。四个神经双目/三目模型的
+部署与回归证据见 `docs/model-isolation.md` §11–§12。CPU 测试数量随代码变化，不在本规格中冻结旧计数。
 
 建议并行拆分（文件所有权互斥）：
 - A：`schema.py` + `masks.py` + 单元测试（M0/M1 依赖）
 - B：`service/*` + `client.py` + `cli.py` + HTTP 契约测试
 - C：`tools/sam3.py` + `tools/fake.py` + `registry.py`
 - D：`geometry.py` + `fusion.py` + `verification.py` + 几何测试
-- E：`config.py` + `cache.py` + Docker/systemd + 文档
+- E：`config.py` + `cache.py` + systemd + 文档（独立模型环境按 D33）
 
 ---
 
@@ -544,7 +600,10 @@ percepta/
 
 ---
 
-## 17. 性能目标（v0.1，单卡 3090/H20 量级，仅参考）
+## 17. 原始性能目标（v0.1，历史目标，非当前实测承诺）
+
+下面保留最初目标值，不能解释为已达标。当前模型实测按输入尺寸、GPU 和日期分别记录在
+`docs/model-isolation.md`，不据不同输入的单次 smoke 进行模型排名。
 
 | 项 | 目标 |
 |---|---|
@@ -568,22 +627,25 @@ percepta/
 | v0.2.0 | 2026-11-05 | 补充 D28–D32：**真实 SAM3 端到端验证通过**（S9 关闭，实测记录见 `docs/model-isolation.md` §10）、启动预热、`wait_until_ready` 等待热态、introspection 统一读类属性、空 `cuda_visible_devices` 语义修正。包版本升至 0.2.0，新增 `CHANGELOG.md` |
 | v0.2.1 | 2026-11-05 | 工程加固：模型运行时改为 `uv_envs/<model>/` 独立锁定项目（移除根 `sam3` extra，D33）、锁文件可移植性由 CI 强制检查（D34）、空 `cuda_visible_devices` 语义修正（D32）。包版本 0.2.1，新增首个 CI 工作流 |
 | v0.2.2 | 2026-11-05 | 附录 A 的 `tool_unavailable` 由 503 修正为 **200**，与 D17 实现对齐（消除 spec 自身矛盾）；D17 从「待复核」转为「已决」。补充该行的语义说明与调用方契约 |
+| v0.3.0 | 2026-11-09 | D35 已落地：采样柱体轮廓约束、完整 IoU 曲线峰值搜索、可选分轴不确定度与 method；本行补记对应已发布版本，未重写此前历史 |
+| v0.3.0-doc.1 | 2026-11-12 | 按 `534066a` 对齐当前字段、pipeline、模型隔离、双目/三目能力与 SAM3 API；D36–D38 部署及修复仍为 Unreleased。原文、原因和代码审计限制见 `docs/documentation-changes.md`；本次不升级包或 schema |
 
 ---
 
-## 19. 待决问题（实现时可先按保守方案）
+## 19. 原始待决问题与当前结论
 
-1. 是否支持 point 提示？官方 `Sam3Processor` 未暴露，需要自定义 `forward_grounding` 或引入 SAM2；v0.1 建议：schema 保留 `point`，SAM3 工具返回 `unsupported_prompt`，由 `fake`/未来工具实现。
-2. 多相机并行调用工具是否安全？v0.1 由服务层串行化，文档记录。
-3. 是否内置单目深度工具（如 Depth Anything）？列为 v0.2 可选。
-4. 是否支持视频/跟踪？v0.2。
+1. point：schema 保留，当前 SAM3 官方处理器不支持，返回 `unsupported_prompt`；`fake` 可处理点提示。
+2. 多相机调用：每请求每工具一次，带全部相机，推理由 per-tool 锁串行化；不提供自动多 worker 调度。
+3. 独立单目深度工具：仍为可选未来项；当前 DA3 是三目后端。
+4. 视频/跟踪：尚未实现，仍属当前非目标。
 5. 与具体 Agent Policy（如 PeerAgent）的适配层是否进本仓库？建议**不进**，在策略侧写 adapter。
 6. 缓存 key 是否包含 `context`？v0.1 不包含（避免调试困惑），在 §11.4 注明。
 
 ### 19.1 实现取向（v0.1 已决）
 
-下列条目是 §19 的落地裁定：实现时按此执行，不得各自发明。完整理由见
-[`docs/decisions.md`](docs/decisions.md)（同编号）。
+下列条目保留早期裁定；**2026-11-12 对齐说明**：D4/D16 的首过阈值与中高截面已由 D35 替代，
+D23/D27 的模型依赖边界已由 D33 替代。现行描述以 §3/§5/§9/§13 及下表后续决策为准，
+完整理由见 `docs/decisions.md`（同编号），修订前原文仍可在基线 `534066a` 查阅。
 
 | # | 歧义 | v0.1 取向 |
 |---|---|---|
@@ -615,6 +677,19 @@ percepta/
 | D26 | 包 `__init__` 的导入开销 | 仅 `schema` 急加载，其余公共名走惰性 `__getattr__`；否则瘦环境里的 worker 会因缺 pyyaml/pillow 而启动失败。worker 环境只需 `numpy`+`pydantic` |
 | D27 | 库与模型依赖/资产的边界 | **库不管理模型框架依赖**（不提供 requirements 清单，删除了 `requirements/`、`docker/`）；但**必须约束模型资产**：`checkpoint` 路径 + 可选 `checkpoint_sha256` + `verify_weights`（`if-declared`/`always`/`never`），并提供 `percepta models check` 启动前自检。理由：错误的权重会静默加载并输出错结果。YAML 纯数字哈希被解析为整数时**报错而非静默跳过** |
 
+### 19.2 后续决策与当前实现
+
+| # | 当前结论 |
+|---|---|
+| D28 | SAM3 实测接入：全关键字构造、传入 model 的 processor、PIL 图像、BPE 资产及 BF16 输出转换 |
+| D29–D30 | 后台 pipeline warmup；客户端等待预热结束，另查工具及预热结果 |
+| D31–D32 | introspection 统一模型元数据；空 CUDA 可见设备配置继承环境，不自动选卡 |
+| D33–D34 | 每模型独立锁定 uv 项目，主库不含模型 extra；CI 检查官方源及所有锁的新鲜度 |
+| D35 | 采样柱体约束、IoU 峰值、分轴不确定度；替代 D4/D16 的旧算法；本轮确认的两个实现限制另记修订日志 |
+| D36 | FoundationStereo 独立双目运行时，实际 RGB/mask 校正与 OpenCV +Z 几何 |
+| D37 | FFS、MVSAnywhere、DA3 独立运行时；严格资产加载、显式尺度与无静默模型替换 |
+| D38 | DA3 尺寸校验及 float64 位姿重基准、wheel 资产清单、worker 故障健康状态 |
+
 ---
 
 ## 附录 A：错误码
@@ -622,7 +697,7 @@ percepta/
 | code | 场景 | HTTP |
 |---|---|---|
 | `invalid_request` | 字段缺失/类型错/尺寸不匹配 | 400 |
-| `unsupported_prompt` | 工具不支持该 prompt 类型 | 400（Percept.status） |
+| `unsupported_prompt` | 工具不支持该 prompt 类型 | **200**（Percept.status=`invalid_request`，message/code=`unsupported_prompt`；D1） |
 | `unauthorized` | token 缺失/错误 | 401 |
 | `payload_too_large` | 超过 `max_body_bytes` | 413 |
 | `busy` | 队列满 | 503 |
@@ -659,9 +734,24 @@ percepta/
 
 ## 附录 C：与上游模型的边界
 
-- SAM3：官方 `sam3` 包；`build_sam3_image_model(device, checkpoint_path, load_from_HF=False, enable_inst_interactivity=True)`；`Sam3Processor(resolution=1008)`；`set_image` 一次、`set_text_prompt`/`add_geometric_prompt(box=[cx,cy,w,h] normalized)` 复用 state；输出 `masks (N,1,H,W) bool`（原图尺寸）、`boxes xyxy`、`scores`。
+- SAM3：官方 `sam3==0.1.4`，当前适配器使用如下已核实的调用；构造器首位置参数是 BPE 路径，不能位置传入 device：
+
+  ```python
+  model = sam3.build_sam3_image_model(
+      bpe_path=bpe_path, device=device, eval_mode=True, checkpoint_path=checkpoint,
+      load_from_HF=False, enable_segmentation=True, enable_inst_interactivity=True,
+  )
+  processor = Sam3Processor(model, resolution=1008, device=device, confidence_threshold=0.5)
+  state = processor.set_image(PIL.Image.fromarray(rgb_uint8))
+  state = processor.set_text_prompt(prompt="bottle", state=state)
+  # 框提示：processor.add_geometric_prompt(box=[cx, cy, w, h], label=True, state=state)
+  ```
+
+  输出 `masks (N,1,H,W) bool`（原图尺寸）、`boxes xyxy`、`scores`；BF16 结果先转 float32 再转 NumPy。
+  同图状态可复用；官方处理器不提供 point prompt。本段是适配器调用摘录，模型运行在其独立环境中。
 - 权重 gated（HuggingFace `facebook/sam3`）；路径由配置注入，仓库不含权重。
-- 若上游 API 变更，只允许改 `tools/sam3.py`，不得泄漏到 schema。 
+- 若 SAM3 上游 API 变更，在 `tools/sam3.py` 的适配边界处理，不得泄漏到 schema。
+- 四个神经双目/三目模型的适配器、协议及资产边界见 `docs/model-isolation.md` §11–§12；不复用 SAM3 单图 mask 协议。
 
 ## 附录 D：最小使用示例（伪代码）
 

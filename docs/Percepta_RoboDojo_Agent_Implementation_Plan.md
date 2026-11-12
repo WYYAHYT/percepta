@@ -6,6 +6,13 @@
 > **评测对象**：RoboDojo Agent-Only Policy
 > **状态**：设计与任务规划，**不是已实现功能或实测结果**
 
+> **现行阅读说明与修订记录（2026-11-12，核对代码 `534066a`）**：上列状态及后文任务单
+> 保留原方案的范围；模型部署进度见 §12 和 `docs/model-isolation.md`。本文的 M0–M5
+> 属于后来的扩展规划，与原 `percepta-SPEC.md` 已完成的核心 M0–M5 不是同一组。
+> 本轮只统一文档，不实施 RoboDojo 接入或评测，也不把这些历史规划当作当前必须完成的下一步。
+> 下文 A1 的旧补充曾误读 pipeline，已在本次修订中纠正，并保留被撤回的原文供追溯。
+> 本轮各处原文、修订内容和原因汇总于[文档修订记录](documentation-changes.md)。
+
 ---
 
 > ## ⚠️ 编者补充说明（Editor's amendments）
@@ -25,11 +32,15 @@
 >
 > | 编号 | 位置 | 性质 | 摘要 |
 > |---|---|---|---|
-> | A1 | §2 表格 / §8.3 | **原文已过时** | “后运行 geometry tool 覆盖 `fused`”的问题已在 D15 修复并有测试锁定 |
+> | A1 | §2 表格 / §8.3 | **2026-11-12：旧补充需纠正** | D15 避免重复融合；实际仍由后一个成功 geometry 阶段覆盖 `fused`，没有 first-wins 或自动 fallback 策略 |
 > | A2 | §9.2 | **原文要求正确，代码有缺口** | `Calibration` 缺 `frame_id`，无法表达“同一相机不同时刻的位姿” |
 > | A3 | §3.1 D0 行 | **原文缺少量级** | 现有轮廓法的实测精度（厘米级）未给出，无法判断双目要提升多少才有意义 |
 > | A4 | 新增 §12.0 | **原文缺少前置测量** | 相机共视率与基线长度未先行测量，而这决定整个方案可行性 |
 > | A5 | §1.2 | **原文缺量化门槛** | 假设可证伪，但没有“改善多少算改善”的阈值 |
+>
+> **A1 修订记录（2026-11-12）**：本表原文为“**原文已过时**”“‘后运行 geometry tool
+> 覆盖 `fused`’的问题已在 D15 修复并有测试锁定”。核对实际 `_take_geometry()` 后发现
+> 此判断错误，现以 §8.3 的现行说明为准；当时关于 first-wins 的原补充完整保留在该节历史块中。
 >
 > ### 补充者立场
 >
@@ -509,8 +520,29 @@ result = client.perceive(
 | `triview_3d` | ≤3 RGB + K/T + Mask | `Geometry + view_metrics` | 三目 → 双目 → Mask Geometry |
 | `adaptive_3d` | 1–3 RGB + K/T + Mask | `Geometry + chosen_method + provenance` | 根据质量门控选择 |
 
+> **2026-11-12 当前工具边界**：上表保留目标设计，不是已实现退化契约。当前 `stereo_3d`
+> 严格接收两路 RGB，可由调用方提供原左图 `stereo_mask`；`triview_3d` 严格接收三路 RGB，
+> 支持 `pairs` 和已部署的 MVSAnywhere/DA3 `mvs` 路线。`adaptive_3d`、自动配对、目标 mask
+> 自动接线及表中的逐级 fallback 尚未实现。神经模型不可用时返回 `unavailable`，不自动换算法。
+
 **特别注意**：若现有 `pipeline.py` 存在“后运行的 geometry tool 覆盖 `response.fused`”行为，要制定**单一拥有者**或显式融合/优先级规则，避免 `sam3, multi_view_3d, stereo_3d` 的顺序暗中决定最终结果。
 
+> **2026-11-12 现行说明（更正 A1）**：`PipelineRunner._take_geometry()` 从当前阶段产出的
+> `kind="geometry"` 且 `status="ok"` 结果中选择最后一个放入 `fused`，被选中的结果不再
+> 同时保留于 `percepts`。**后一个成功阶段覆盖前一个成功阶段**；后续阶段无成功结果时，
+> 保留已有 `fused`，错误结果仍出现在 `percepts`。没有“后续成功结果被忽略”的规则，
+> 也没有 first-wins 专属警告。
+>
+> `options.fuse=false` 不让 pipeline 跳过显式选择的 geometry 工具。`multi_view_3d` 自身
+> 调用通用融合并遵守该开关；当前 `stereo_3d` / `triview_3d` 不读取该开关，仍可填充
+> `fused`。没有显式 geometry 阶段时，该开关禁用补充 `fusion.fuse()`；只要执行过 geometry
+> 阶段，pipeline 就不再自动调用通用融合。已有成功结果得以保留是顺序执行的结果，
+> 不是基于质量的备用模型选择策略。
+> D15 解决的是重复计算和重复输出，没有实现自动 fallback；调用方需要明确选择工具顺序。
+>
+> **被撤回的历史补充（2026-11-10 原文保留，2026-11-12 纠正）**：以下 A1 曾把
+> “不再二次 fuse”误读为“第一个成功结果生效”。不得用下列旧结论指导当前实现。
+>
 > **【编者补充 v1.2 — A1：此问题已在 v0.3.0 解决，原文描述已过时】**
 >
 > 审计 commit `267ad92` 确认：**“后运行的 geometry tool 覆盖 `fused`” 不再成立**。
@@ -541,6 +573,10 @@ result = client.perceive(
 > 已有测试 `tests/unit/test_pipeline.py` 覆盖此行为，新增工具须补充同类测试。
 
 ### 8.4 建议配置（不是既有字段）
+
+> **2026-11-12 说明**：本节保留设计示例原文。`pair_selection: auto`、`fallback_to`、
+> `adaptive_3d` 等不是当前工具已支持的功能；可执行部署配置使用 `configs/local-*.yaml`。
+> 双目模型用 `stereo_backend` 选择，执行位置使用 `backend: subprocess`，两者含义不同。
 
 ```yaml
 pipeline:
@@ -910,6 +946,11 @@ bash scripts/robodojo.sh summarize
 > A4b 按调 `max_disp=384` 估算，实测需要 **~400 px（HL）到 ~600 px（LR）** 才能覆盖
 > 0.4 m 的近距离。M1 应设 `max_disp≈640`（640×480 图像的一半宽度，是安全上限），
 > 或对 `LR` 用 `scale 0.5` 折半。显存代价在 24 GB 卡上可忽略。
+>
+> **2026-11-12 更正（保留上段原文）**：原“640×480 图像的一半宽度”数值本身有误，
+> 640 是该图像的全宽。更关键的是，部署的 FFS 23-36-37 checkpoint 位置编码限制为
+> 416 视差像素，实跑 640 失败；显存充足不能解除这个模型结构限制。该段仅保留当时的
+> 几何需求估计，不表示当前模型已覆盖该近距场景，也不构成缩放方案的实测保证。
 >
 > **仍未验证（不要当成已知）**
 >

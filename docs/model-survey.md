@@ -7,6 +7,12 @@
 > Fast-FoundationStereo 的该研究 checkpoint 不能只改参数就运行 640 视差，实际限制为 416。
 > MVSAnywhere 也已找到官方内存 API，无需逐请求写图片目录。
 
+> **修订记录与阅读方式（2026-11-12，核对代码 `534066a`）**：下文保留部署前原话和当时的
+> 官方示例，局部追加本轮实测更正，不把历史建议当作现行命令。四个模型均已部署；
+> 不需再次决定安装优先级。重建使用各模型 `uv_envs/<model>/` 的锁定项目，当前入口见
+> [模型隔离文档](model-isolation.md) §11–§12。授权限制继续有效；未由此声明物体定位精度。
+> 本轮各处原文、修订内容和原因汇总于[文档修订记录](documentation-changes.md)。
+
 > 调研时间 2026-11-11。对象是 `docs/Percepta_RoboDojo_Agent_Implementation_Plan.md` 里
 > 列出的 D2/D3/D5/D6 四个神经模型。**只做信息核实，没有安装、没有下载权重、没有跑推理。**
 >
@@ -85,6 +91,10 @@ conda run -n foundation_stereo pip install flash-attn   # 必须单独装
 2. **需要 `flash-attn`**，编译耗时且对 CUDA 版本敏感。H20 + CUDA 12.8 需实测。
 3. **非商业授权**。研究场景可用。
 
+> **2026-11-12 更正**：上文“`flash-attn` 要单独安装”“需要 `flash-attn`”是保留的调研
+> 判断；固定源码的实际推理使用 SDPA / xformers，独立环境未安装 `flash-attn`。
+> conda 命令是上游历史示例，当前用 `uv sync --project uv_envs/foundation-stereo --locked`。
+
 ### 接入方式
 
 ```
@@ -97,6 +107,12 @@ stereo_3d 工具
 ```
 
 **复用面很大**：校正、反投影、不确定度、Geometry 构造全都不用改，只替换视差计算。
+
+> **2026-11-12 更正**：上图原“`backend="foundation_stereo"`”“`uv_envs/envs/…`”
+> 不对应现行配置：模型选择键为 `stereo_backend: foundation_stereo`，执行位置为
+> `backend: subprocess`，目录为 `uv_envs/foundation-stereo/`。worker 接收校正 RGB 并返回
+> 视差；K、基线和世界投影留在主进程。原“几何……全都不用改”是接线前预期，实际部署
+> 修复了 RGB/mask remap、相对位姿和 +Z 反投影，见 D36。
 
 ---
 
@@ -121,6 +137,11 @@ stereo_3d 工具
 
 **`max_disp` 是可调参数，不是硬上限。** 我们实测 RoboDojo 需要 ~400 px（HL）到 ~600 px（LR）
 才能在 0.4 m 工作，所以必须调大到 ~640。
+
+> **2026-11-12 更正**：保留原“`max_disp` 是可调参数，不是硬上限”“必须调大到 ~640”
+> 的调研结论。实际部署的 23-36-37 checkpoint 带固定 26-token 位置编码，支持上限为
+> **416**，实跑 640 失败；不能只改参数获得该近距覆盖。相关几何需求是模型范围的设计
+> 约束，不是已经达到的能力或实测定位误差。
 
 ### 权重
 
@@ -163,7 +184,10 @@ CUDA_VISIBLE_DEVICES=0 python src/mvsanywhere/run_demo.py \
     --image_height 480 --image_width 640
 ```
 
-### 输入格式：这是最大的接入成本
+### 输入格式：部署前对 CLI demo 的判断
+
+> **修订记录（2026-11-12）**：原标题“输入格式：这是最大的接入成本”及下文“不吃内存里的
+> 数组”只针对当时看到的 CLI demo。现行部署使用官方 `hubconf.py` 内存入口，原判断保留如下。
 
 它**不吃内存里的数组**，而是吃**磁盘上的目录结构**：
 
@@ -225,6 +249,10 @@ pip install -e .
 3. **磁盘 IO 格式**——每次推理写临时目录。
 4. 需要 `mamba`（可翻译成 uv）。
 
+> **2026-11-12 更正**：原阻塞项 2–4（额外 ScanNet 变换、每次写临时目录、必须使用 mamba）
+> 已被内存 API 的源码核对和真实部署消除。HERO 使用 OpenCV 相机轴、float64 首相机重基准
+> 和独立 uv 环境；不另做 world 轴翻转、不写每请求图片目录，也不需要 mamba。非商业许可仍有效。
+
 ### 价值
 
 **"原生三视角联合推断"**——这是 `triview_3d` 的 `mvs` 后端。与 `pairs`（三组双目融合）
@@ -277,6 +305,10 @@ prediction.intrinsics   # [N, 3, 3]
 
 **接入时必须明确用哪个模型、要不要自己乘尺度。** 用错了不会报错，只会差一个常数倍。
 
+> **2026-11-12 现行补充**：当前接入 **DA3-BASE**，给出已知位姿并设置
+> `align_to_input_ext_scale=True`，通过非共线的三个米制相机中心完成尺度对齐。
+> 不是把 BASE 的任意相对深度直接当作米，也没有套用上文 METRIC-LARGE 的公式。
+
 ### 环境
 
 ```bash
@@ -297,9 +329,17 @@ pip install -e .
 - 自带 `conf` 置信度，可以直接进我们的不确定度体系
 - 还能交叉校验我们的相机标定（它估的 `extrinsics` 可以和 RoboDojo 给的对比）
 
+> **2026-11-12 更正**：原“正好是 `pairs` 后端需要的输入格式”“`conf`……可以直接进我们的
+> 不确定度体系”是部署前设想。DA3 当前属于 `triview_method: mvs` 路线，`pairs` 仍是逐对
+> SGBM 融合；DA3 原始 confidence 仅是未校准模型分数。工具显式使用 0.03 m 不确定度假设，
+> 不将 confidence 换算为已测得的定位误差。当前 DA3 环境无需 xformers，依赖以独立锁为准。
+
 ---
 
-## 建议的接入顺序
+## 建议的接入顺序（部署前记录）
+
+> **修订记录（2026-11-12）**：原标题“建议的接入顺序”。下表保留历史理由；现有四套部署
+> 已完成，MVSAnywhere 的“坐标转换＋磁盘 IO 成本最高”理由已由上文实接入口更正。
 
 | 顺序 | 模型 | 理由 |
 |---|---|---|
@@ -328,6 +368,11 @@ FoundationStereo ViT-large、DA3-GIANT 1.4B。下载和存储要预留空间（�
 
 **四个都要从 `environment.yml` / `requirements.txt` 翻译成 `pyproject.toml` + `uv.lock`。**
 
+> **2026-11-12 状态更新**：上文 conda/mamba/flash-attn/xformers 清单保留上游调研快照，
+> 不是现在的安装要求。四个模型已各有独立 uv 项目和锁；FoundationStereo 不需要 flash-attn，
+> HERO 不使用 mamba，DA3 不需要 xformers。根据兼容性分别使用 cu124、cu118、cu128，
+> 没有替换系统 CUDA。具体版本见模型隔离文档 §12。
+
 **3. 只有 `pairs` 路线不用等模型**
 
 `triview_3d` 的 `pairs` 后端（三组 SGBM 融合）**现在就能跑**，不需要任何权重。它给了
@@ -352,7 +397,11 @@ FoundationStereo ViT-large、DA3-GIANT 1.4B。下载和存储要预留空间（�
 
 ---
 
-## 需要你决定的
+## 部署前的待决记录（历史）
+
+> **修订记录（2026-11-12）**：原标题“需要你决定的”。以下问题保留原文，不再是当前待审批
+> 的部署事项；四模型已完成部署，本页磁盘／网络数字是当时快照。原“实测的 0.5–1.7 mm”
+> 使用了假设的视差噪声，属于几何误差估计，不能当作当前模型定位精度的测量结果。
 
 1. **优先级**：先接 FoundationStereo（精度上限最高、接口最贴合），还是先做 DA3-BASE
    （Apache 2.0 无授权障碍）？
