@@ -89,11 +89,11 @@ the service is up either way, and a broken model is reported separately in
 |---|---|---|
 | *(none)* | `pydantic`, `numpy`, `pillow`, `pyyaml` | schema, masks, fake tool, SDK |
 | `service` | `fastapi`, `uvicorn` | `percepta serve` |
-| `sam3` | nothing — see `uv_envs/sam3/` | the real segmenter (weights supplied at runtime) |
+| `stereo` | `opencv-python-headless` | stereo rectification and SGBM |
 | `dev` | `pytest`, `httpx`, `ruff` | tests and lint |
 
 `torch` is deliberately **not** a default dependency: the contract suite must run on a
-GPU-less machine.
+GPU-less machine. SAM3 and neural depth models use separate locked projects under `uv_envs/`.
 
 ## HTTP API
 
@@ -106,7 +106,8 @@ GPU-less machine.
 | GET | `/metrics` | optional Prometheus text |
 
 Error mapping: `400` invalid request · `401` missing/wrong bearer · `413` body over
-`max_body_bytes` · `503` queue full / tool unavailable · `504` timeout · `500` internal.
+`max_body_bytes` · `503` queue full · `504` timeout · `500` internal.
+An unavailable model returns HTTP `200` with Percept `status="unavailable"` and `tool_unavailable` in warnings.
 **`not_found` is a Percept status, not an HTTP error** — it arrives inside a `200`.
 
 Binding is loopback-only by default (`127.0.0.1:8790`); put an SSH tunnel in front of it
@@ -141,6 +142,9 @@ tools:
 | `fake` | fake | — | colour threshold + connected components; makes CI meaningful |
 | `sam3` | segmenter | GPU + gated weights | text/box prompted open-vocabulary masks |
 | `multi_view_3d` | geometry | calibration (optional depth) | multi-view fusion → 3D centroid/bbox/yaw |
+| `stereo_3d` | geometry | exactly two calibrated RGB views; OpenCV | SGBM, FoundationStereo or Fast-FoundationStereo → visible-surface geometry |
+| `triview_3d` | geometry | exactly three calibrated RGB views | pairwise SGBM, MVSAnywhere HERO or DA3-BASE → visible-surface geometry |
+
 A tool declares `capabilities()`; the pipeline validates prompts against those *before*
 calling, so a box-only tool handed a text prompt yields a Percept with
 `status="invalid_request"`, `message="unsupported_prompt"` — never a request-level failure.
@@ -199,6 +203,77 @@ percepta's protocol and schema, nothing heavier. Each model gets its own GPU via
 
 Full design, wire protocol and the checklist for adding a model:
 [`docs/model-isolation.md`](docs/model-isolation.md).
+
+### FoundationStereo research runtime
+
+FoundationStereo is **not** Fast-FoundationStereo: use `stereo_backend: foundation_stereo`.
+Fast-FoundationStereo has its own `ffs` deployment below. The official 23-51-11 checkpoint is restricted to
+**non-commercial research**. Source, checkpoint and auxiliary backbone hashes are pinned in
+[`uv_envs/foundation-stereo/assets.json`](uv_envs/foundation-stereo/assets.json).
+
+```bash
+uv sync --extra stereo --locked
+uv sync --project uv_envs/foundation-stereo --locked
+uv_envs/foundation-stereo/.venv/bin/python scripts/bootstrap_foundation_stereo.py
+uv run --extra stereo percepta models check --config configs/local-foundation-stereo.yaml
+# Select an available GPU in the shell before running either command.
+uv run --extra stereo python scripts/foundation_stereo_smoke.py --http
+uv run --extra stereo percepta serve --config configs/local-foundation-stereo.yaml
+```
+
+The dedicated service listens on loopback port 8791; the default pipeline and SAM3 runtime
+are unchanged. Send two RGB images with matching calibration and
+`context={"stereo_left": "left", "stereo_right": "right"}`. Set
+`options={"tools": ["stereo_3d"]}` when selecting this tool in a configured multi-tool service.
+The API still requires a prompt, but this geometry-only tool does **not** segment that prompt:
+without an original-left-image `stereo_mask`, the output summarizes the whole valid scene.
+Its bbox and centroid describe visible points, not an inferred complete object.
+
+See [`docs/model-isolation.md`](docs/model-isolation.md) §11 for verified timings,
+offline initialization, failure semantics and runtime settings.
+
+### Other deployed stereo and three-view models
+
+Each model has a pinned source/asset manifest, an independent `pyproject.toml`/`uv.lock`,
+an asset bootstrap and a real GPU smoke. Run commands from the repository root.
+
+| Model | Runtime directory | Configuration | Selector | License |
+|---|---|---|---|---|
+| Fast-FoundationStereo 23-36-37 | `uv_envs/fast-foundation-stereo` | `configs/local-fast-foundation-stereo.yaml` | `stereo_backend: ffs` | non-commercial research |
+| MVSAnywhere HERO | `uv_envs/mvsanywhere` | `configs/local-mvsanywhere.yaml` | `triview_method: mvs`, `triview_backend: mvsanywhere` | non-commercial research |
+| DA3-BASE | `uv_envs/da3` | `configs/local-da3.yaml` | `triview_method: mvs`, `triview_backend: da3` | Apache-2.0 |
+
+```bash
+uv sync --project uv_envs/fast-foundation-stereo --locked
+uv_envs/fast-foundation-stereo/.venv/bin/python scripts/bootstrap_fast_foundation_stereo.py
+CUDA_VISIBLE_DEVICES=1 uv run --extra stereo python scripts/fast_foundation_stereo_smoke.py --http --upstream
+
+uv sync --project uv_envs/mvsanywhere --locked
+uv_envs/mvsanywhere/.venv/bin/python scripts/bootstrap_mvsanywhere.py
+CUDA_VISIBLE_DEVICES=5 uv run python scripts/multiview_smoke.py --config configs/local-mvsanywhere.yaml --http
+
+uv sync --project uv_envs/da3 --locked
+uv_envs/da3/.venv/bin/python scripts/bootstrap_da3.py
+CUDA_VISIBLE_DEVICES=4 uv run python scripts/multiview_smoke.py --config configs/local-da3.yaml --http
+
+# Start the selected service; choose an available GPU for this machine.
+CUDA_VISIBLE_DEVICES=4 uv run percepta serve --config configs/local-da3.yaml
+```
+
+Send exactly three RGB images and their pixel intrinsics / camera-to-world calibration to
+`triview_3d`. DA3 requires non-collinear camera centres for metric pose alignment; MVSAnywhere
+requires distinct centres. The outputs describe whole-scene visible surfaces; text prompts
+do not segment targets. Confidence is not a calibrated positioning error.
+
+DA3 rejects extreme image aspect ratios that would leave less than one processed patch;
+these requests return `invalid_request` and preserve the loaded worker. Camera poses are
+rebased in float64 before model input, while output world geometry uses the original calibration.
+FFS and MVSAnywhere manifests are packaged in the wheel. A crashed worker is reported as
+`error` in tool health, including when it exits between requests.
+
+The deployed Fast-FoundationStereo checkpoint supports `max_disp <= 416`; 640 was tested and
+fails inside its fixed positional encoding. Full reproducibility and validation notes:
+[`docs/model-isolation.md`](docs/model-isolation.md) §12.
 
 ### Adding a model — checklist
 

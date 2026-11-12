@@ -1,0 +1,38 @@
+# Official 23-36-37 research checkpoint. Run from repository root.
+server:
+  host: 127.0.0.1
+  port: 8792
+  max_queue: 2
+  request_timeout_ms: 600000
+device:
+  cuda_visible_devices: ""
+pipeline:
+  default: [stereo_3d]
+tools:
+  stereo_3d:
+    enabled: true
+    stereo_backend: ffs
+    backend: subprocess
+    python: uv_envs/fast-foundation-stereo/.venv/bin/python
+    source_dir: models/Fast-FoundationStereo
+    checkpoint: checkpoints/fast-foundation-stereo/model_best_bp2_serialize.pth
+    checkpoint_sha256: "af0658f289ec840b292645f8d5538978f06e8cabaa1fd31e84acc91af268e990"
+    verify_weights: always
+    model_config: checkpoints/fast-foundation-stereo/cfg.yaml
+    model_config_sha256: "d45afe99b176454d5aff416edf16c8da6a99579f8f374b927f37907442a7d6bc"
+    valid_iters: 8
+    max_disp: 416
+    startup_timeout_s: 300
+    timeout_s: 300
+  fake:
+    enabled: false
+  sam3:
+    enabled: false
+  multi_view_3d:
+    enabled: false
+  triview_3d:
+    enabled: false
+cache:
+  enabled: false
+warmup:
+  enabled: false

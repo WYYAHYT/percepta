@@ -6,24 +6,33 @@ took where the spec is ambiguous (spec §19).
 
 ## 1. Current state
 
-M0–M5 are **done and green** under `uv`.
+The original specification's M0–M5 are complete. The later RoboDojo implementation plan is
+broader and remains in development; completing the original milestones does not complete that
+plan's policy integration or task-level accuracy validation.
+
+The current model runtimes are SAM3, FoundationStereo, Fast-FoundationStereo, MVSAnywhere
+HERO and DA3-BASE, each isolated under `uv_envs/`. Neural stereo/triview tools have real-model
+smoke coverage; consult `docs/model-isolation.md` for deployment evidence and limits. Run the
+checks below against the current worktree instead of relying on an old test count.
 
 ```bash
 uv sync                              # creates .venv (Python 3.10) from uv.lock
-uv run pytest -q                     # 277 passing, 2 skipped (gpu), no GPU/network/weights
+uv run pytest -q                     # default tests need no GPU/network/weights
+uv run --extra stereo pytest -m "not gpu" -q  # also exercise optional OpenCV geometry
 uv run ruff check .                  # clean
 uv run python scripts/e2e_smoke.py   # real uvicorn; HTTP and in-process agree
 ```
 
 **Dependencies are managed by `uv`.** `uv.lock` is committed and generated against the
 official PyPI index, so it resolves anywhere; `.python-version` pins Python 3.10.
-`torch` / `sam3` live behind the `sam3` extra and are **never** part of a default sync
-(spec §13). `uv sync` installs the `dev` group by default, so a fresh clone can run the
+Model dependencies such as `torch` and `sam3` live in independent locked projects and are
+**never** part of a default sync (D33). `uv sync` installs the `dev` group by default, so a fresh clone can run the
 test suite immediately; `uv sync --no-dev` gives a minimal runtime environment.
 
 ```bash
 uv sync --extra service    # + fastapi/uvicorn (also in dev, so usually unnecessary)
-uv sync --extra sam3       # + torch>=2.7, sam3==0.1.4  (multi-GB, GPU machine only)
+uv sync --extra stereo     # optional CPU OpenCV matcher and geometry regression tests
+uv sync --project uv_envs/sam3 --locked  # independent SAM3 GPU runtime, multi-GB
 ```
 
 Local network note for *this* host: PyPI official takes ~23 s per request through the
@@ -42,7 +51,9 @@ python scripts/check_lock_portability.py --list   # show every domain and its co
 
 It runs as the first CI step (`.github/workflows/ci.yml`), before any install — a bad lockfile
 fails every download, so checking it first turns a wall of "not found" into one clear message.
-Lockfiles are also checked for staleness with `uv lock --check` in both projects.
+CI also checks lockfile staleness with `uv lock --check` in the root and every model project.
+Its default CPU job preserves the minimal install; a separate CPU job installs the `stereo`
+extra so OpenCV regression tests run. CI does not install model runtimes or download weights.
 
 Every model runtime lives in its own locked project under `uv_envs/<model>/` (D33) — there is
 deliberately **no** `sam3` extra in the root `pyproject.toml`.

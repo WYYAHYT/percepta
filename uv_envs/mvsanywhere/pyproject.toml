@@ -1,0 +1,36 @@
+[project]
+name = "percepta-mvsanywhere-env"
+version = "0.1.0"
+description = "Isolated official MVSAnywhere HERO research inference runtime"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+  # Preserve the upstream environment's tested Python / torch / CUDA stack.
+  "torch==2.1.2+cu118",
+  "torchvision==0.16.2+cu118",
+  "torchaudio==2.1.2+cu118",
+  "numpy==1.26.4",
+  "setuptools==69.5.1",
+  "lightning>=2.2,<2.3",
+  "kornia==0.6.7",
+  "timm>=0.9,<1.1",
+  "antialiased-cnns",
+  "einops",
+  "moviepy==1.0.3",
+  "loguru==0.7.2",
+  "opencv-python-headless==4.9.0.80",
+  "matplotlib",
+  "scipy",
+  "pyyaml",
+  "pillow",
+  "pydantic>=2",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu118"
+url = "https://download.pytorch.org/whl/cu118"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu118" }
+torchvision = { index = "pytorch-cu118" }
+torchaudio = { index = "pytorch-cu118" }

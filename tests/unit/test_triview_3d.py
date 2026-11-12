@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 
 from percepta.schema import Calibration, PerceiveOptions, ToolContext
+from percepta.tools import triview_3d as triview
 from percepta.tools.triview_3d import (
     ERR_BACKEND_NOT_CONFIGURED,
     ERR_NEEDS_THREE_VIEWS,
@@ -23,6 +24,8 @@ from percepta.tools.triview_3d import (
     TOOL_NAME,
     Triview3DTool,
 )
+
+cv2 = pytest.importorskip("cv2", reason="triview pair tests require optional OpenCV")
 
 FOCAL = 397.0413
 WIDTH, HEIGHT = 320, 240
@@ -34,8 +37,8 @@ def _rotation() -> np.ndarray:
     return np.array(
         [
             [1.0, 0.0, 0.0],
-            [0.0, 0.0, -1.0],
-            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, -1.0, 0.0],
         ]
     )
 
@@ -56,7 +59,7 @@ def _plane_image(offset_x: float, plane_y: float = PLANE_Y) -> np.ndarray:
     xs = np.arange(WIDTH)
     ys = np.arange(HEIGHT)
     world_x = (xs - WIDTH / 2) / FOCAL * plane_y + offset_x
-    world_z = (ys - HEIGHT / 2) / FOCAL * plane_y
+    world_z = -(ys - HEIGHT / 2) / FOCAL * plane_y
     tex_u = ((world_x * 160.0) % 512).astype(np.int32)
     tex_v = ((world_z * 160.0 + 256.0) % 512).astype(np.int32)
     grey = texture[tex_v][:, tex_u].astype(np.uint8)
@@ -104,9 +107,7 @@ def test_three_views_recover_the_plane_depth():
     images, cal = _three_view_scene()
     tool = Triview3DTool()
     tool.load({})
-    percepts = tool.perceive(
-        _context(images, cal, stereo_num_disparities=256), []
-    )
+    percepts = tool.perceive(_context(images, cal, stereo_num_disparities=256), [])
     assert len(percepts) == 1, "triview should answer when all pairs work"
     p = percepts[0]
     assert p.status == "ok", p.message
@@ -156,9 +157,7 @@ def test_limiting_pairs_is_reported_as_degradation():
     images, cal = _three_view_scene()
     tool = Triview3DTool()
     tool.load({})
-    p = tool.perceive(
-        _context(images, cal, stereo_num_disparities=256, triview_max_pairs=1), []
-    )[0]
+    p = tool.perceive(_context(images, cal, stereo_num_disparities=256, triview_max_pairs=1), [])[0]
     assert p.extras["pairs_used"] == 1
     assert p.extras["degraded_to_two_view"] is True
     assert "triview_degraded_to_subset_of_pairs" in p.extras["warnings"]
@@ -175,8 +174,9 @@ def test_two_views_are_refused():
     images = {"a": _plane_image(0.0), "b": _plane_image(0.3)}
     tool = Triview3DTool()
     tool.load({})
-    assert tool.perceive(_context(images, cal), []) == []
-    assert ERR_NEEDS_THREE_VIEWS == "triview_needs_three_calibrated_views"
+    p = tool.perceive(_context(images, cal), [])[0]
+    assert p.status == "invalid_request" and p.geometry is None
+    assert p.extras["code"] == ERR_NEEDS_THREE_VIEWS
 
 
 def test_four_views_are_refused():
@@ -184,7 +184,9 @@ def test_four_views_are_refused():
     images = {f"c{i}": _plane_image(0.3 * i) for i in range(4)}
     tool = Triview3DTool()
     tool.load({})
-    assert tool.perceive(_context(images, cal), []) == []
+    p = tool.perceive(_context(images, cal), [])[0]
+    assert p.status == "invalid_request" and p.geometry is None
+    assert p.extras["code"] == ERR_NEEDS_THREE_VIEWS
 
 
 def test_unconfigured_mvs_backend_is_refused():
@@ -192,7 +194,8 @@ def test_unconfigured_mvs_backend_is_refused():
     images, cal = _three_view_scene()
     tool = Triview3DTool()
     tool.load({})
-    assert tool.perceive(_context(images, cal, triview_method="mvs"), []) == []
+    result = tool.perceive(_context(images, cal, triview_method="mvs"), [])[0]
+    assert result.status == "unavailable" and result.extras["code"] == ERR_BACKEND_NOT_CONFIGURED
     assert ERR_BACKEND_NOT_CONFIGURED == "backend_not_configured"
 
 
@@ -225,3 +228,103 @@ def test_capabilities_describe_a_geometry_producer():
 
 def test_name_is_declared():
     assert Triview3DTool().name == TOOL_NAME == "triview_3d"
+
+
+def test_fixture_pins_forward_and_down_axes():
+    np.testing.assert_array_equal(_rotation() @ [0, 0, 1], [0, 1, 0])
+    np.testing.assert_array_equal(_rotation() @ [0, 1, 0], [0, 0, -1])
+    texture = np.random.default_rng(1234).integers(20, 235, (512, 512), dtype=np.int16)
+    u, v = 201, 167
+    x, z = (u - WIDTH / 2) / FOCAL, -(v - HEIGHT / 2) / FOCAL
+    assert _plane_image(0)[v, u, 0] == texture[int((z * 160 + 256) % 512), int(x * 160 % 512)]
+
+
+def test_pair_rectifies_both_images_and_recovers_off_axis_world_points(monkeypatch):
+    a, b = _calibration("a", 0), _calibration("b", 0.2)
+    T = np.array(b.T_world_cam)
+    T[:3, :3] = T[:3, :3] @ cv2.Rodrigues(np.array([0.03, -0.02, 0.015]))[0]
+    b.T_world_cam = T.tolist()
+    images = [_plane_image(0), _plane_image(0.2)]
+    K, R1, info = triview._rectify(a, b, (HEIGHT, WIDTH))
+    expected = [
+        cv2.remap(image, *info[key], cv2.INTER_LINEAR)
+        for image, key in zip(images, ("map_a", "map_b"), strict=True)
+    ]
+    assert all(not np.array_equal(raw, rect) for raw, rect in zip(images, expected, strict=True))
+    uv = np.array([[190, 90], [210, 130], [240, 155]])
+    depth = np.array([0.8, 1.1, 1.3])
+    d = np.zeros((HEIGHT, WIDTH))
+    d[uv[:, 1], uv[:, 0]] = info["focal_rect_px"] * info["baseline_m"] / depth
+
+    def matcher(left, right, **kwargs):
+        np.testing.assert_array_equal(left, expected[0])
+        np.testing.assert_array_equal(right, expected[1])
+        return d, d > 0
+
+    monkeypatch.setattr(triview, "_sgbm_disparity", matcher)
+    result = triview._pair_points(
+        a, b, *images, num_disparities=128, block_size=5, sigma_d=1, min_valid_fraction=0
+    )
+    assert result is not None
+    rect_points = np.column_stack(
+        ((uv[:, 0] - K[0, 2]) / K[0, 0] * depth, (uv[:, 1] - K[1, 2]) / K[1, 1] * depth, depth)
+    )
+    T_a = np.array(a.T_world_cam)
+    expected_world = rect_points @ R1 @ T_a[:3, :3].T + T_a[:3, 3]
+    np.testing.assert_allclose(result["points"], expected_world, atol=1e-10)
+    # Independent world->camera->pixel projection recovers both row and column.
+    camera = (result["points"] - T_a[:3, 3]) @ T_a[:3, :3]
+    assert np.all(camera[:, 2] > 0)
+    rect_camera = camera @ R1.T
+    projected = rect_camera @ K.T
+    np.testing.assert_allclose(projected[:, :2] / projected[:, 2, None], uv, atol=1e-10)
+
+
+@pytest.mark.parametrize("disparity", [0.0, -1.0, np.nan, np.inf, WIDTH + 1.0])
+def test_invalid_pair_depth_is_empty_not_fallback(disparity, monkeypatch):
+    monkeypatch.setattr(
+        triview,
+        "_sgbm_disparity",
+        lambda *a, **kw: (np.full((HEIGHT, WIDTH), disparity), np.ones((HEIGHT, WIDTH), bool)),
+    )
+    images, cal = _three_view_scene()
+    assert Triview3DTool().perceive(_context(images, cal, min_valid_fraction=0), []) == []
+
+
+def test_reversed_pairs_are_reported_not_automatically_swapped():
+    images, cal = _three_view_scene()
+    images["cam0"], images["cam2"] = images["cam2"], images["cam0"]
+    cal["cam0"].T_world_cam, cal["cam2"].T_world_cam = (
+        cal["cam2"].T_world_cam,
+        cal["cam0"].T_world_cam,
+    )
+    p = Triview3DTool().perceive(_context(images, cal), [])[0]
+    assert p.status == "invalid_request" and p.geometry is None
+    assert p.extras["code"] == "reversed_stereo_order"
+    assert len(p.extras["pair_failures"]) == 3
+
+
+def test_malformed_calibration_is_not_hidden_by_other_pairs():
+    images, cal = _three_view_scene()
+    cal["cam2"].K[0][0] = 0
+    p = Triview3DTool().perceive(_context(images, cal), [])[0]
+    assert p.status == "invalid_request" and p.geometry is None
+    assert p.extras["code"] == "invalid_calibration"
+
+
+def test_extra_uncalibrated_image_is_not_ignored():
+    images, cal = _three_view_scene()
+    images["extra"] = images["cam0"]
+    p = Triview3DTool().perceive(_context(images, cal), [])[0]
+    assert p.status == "invalid_request" and p.geometry is None
+    assert p.extras["code"] == ERR_NEEDS_THREE_VIEWS
+
+
+def test_surface_summary_does_not_claim_calibrated_world_axis_uncertainty():
+    images, cal = _three_view_scene()
+    p = Triview3DTool().perceive(_context(images, cal, stereo_num_disparities=256), [])[0]
+    assert p.extras["geometry_scope"] == "matched_visible_surface"
+    assert "pair_correlation" in p.extras["uncertainty_excludes"]
+    assert p.geometry.height_uncertainty_m is None
+    assert p.geometry.lateral_uncertainty_m is None
+    p.model_dump_json()

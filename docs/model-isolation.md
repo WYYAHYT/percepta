@@ -405,3 +405,212 @@ SAM3 是在真实照片上训练的开放词表模型，**平面矢量图里它�
 worker 崩溃后若被静默重启，新进程没有图像状态，会报
 `set_image() must be called before segment()` —— 把矛头指向调用方代码。
 已改为：`segment()` 检测到 worker 已死时直接抛 `BackendUnavailable`（spec §16.4）。
+
+## 11. FoundationStereo 独立运行时
+
+### 11.1 模型与资产
+
+本节记录首个部署的 **FoundationStereo 23-51-11 / ViT-large**，不是 Fast-FoundationStereo。
+选择器为 `stereo_backend: foundation_stereo`；后续 `ffs` 和原生三目部署见 §12。
+官方研究权重限 **non-commercial research**，不随 percepta 分发。
+
+- 源码：`NVlabs/FoundationStereo`，固定在 `6e8806816b533e4d13ddbb95ffa907b797060a62`。
+- checkpoint SHA256：`60e79bde9c6a00acea551625ff814fe06e5a6806e2c0c9829baee248de87c5f1`。
+- 配套 cfg SHA256：`a9d9dd2137c30edc2236194f62df14d222dad5fd3287a33c7540b543bb93853f`。
+- cfg 中 `max_disp=416`；使用 32 次更新，不套用 SGBM 的视差范围。
+- 完整下载来源、辅助资产版本与校验值见 `uv_envs/foundation-stereo/assets.json`。
+
+### 11.2 部署与离线加载
+
+```bash
+uv sync --extra stereo --locked
+uv sync --project uv_envs/foundation-stereo --locked
+uv_envs/foundation-stereo/.venv/bin/python scripts/bootstrap_foundation_stereo.py
+uv run --extra stereo percepta models check --config configs/local-foundation-stereo.yaml
+uv run --extra stereo python scripts/foundation_stereo_smoke.py --http
+uv run --extra stereo percepta serve --config configs/local-foundation-stereo.yaml
+```
+
+启动前用 `nvidia-smi` 确认可用卡，并在 shell 设置 `CUDA_VISIBLE_DEVICES`。
+配置中的空字符串表示继承环境，**不表示自动选择空闲 GPU**。
+服务使用 127.0.0.1:8791；根默认 pipeline、SAM3 环境和系统 CUDA 均不改变。
+
+上游初始化有两个隐式联网入口：timm 的 `edgenext_small(pretrained=True)`，以及
+DINO 的远程 `torch.hub.load`。部署脚本预取并校验 EdgeNeXt 到模型专属 HF cache；
+DINO 改用仓库自带源码，唯一修改的文件及补丁后 hash 也写入资产清单。
+模型参数随后由完整 checkpoint 严格覆盖。worker 设置 HF offline 环境变量，
+缺少缓存应明确失败，而不是请求时再下载。部署脚本可以重复执行；既有资产 hash
+不一致或源码版本不符时拒绝覆盖。
+
+### 11.3 双目协议和结果边界
+
+SAM3 协议的单 RGB + mask 输出不适合视差，因此另设双目协议：两张等尺寸 RGB
+uint8 输入，单张同尺寸 float32 像素视差输出。heavy imports 仅在独立 worker
+执行，模型常驻，启动与通信均有超时，异常会回收自己的 worker，不自动换算法。
+
+`context.stereo_left/stereo_right` 指定调用方选好的两路相机；工具不选择相机。
+两幅图像先校正，原左图坐标的 `stereo_mask` 用最近邻同步重映射。`+Z` 为相机
+前方，视差重建后经校正逆旋转和 `T_world_cam` 输出世界坐标。
+
+没有 mask 时输出**整幅有效场景的可见点统计**，不是 prompt 指定物体的定位；
+bbox/centroid 也不是对不可见表面的补全。不确定度公式中的视差噪声是配置假设，
+不能解释成已测得的毫米级精度。缺权重/worker 失败通过 HTTP 200 返回
+`status="unavailable"`；没有有效点时不伪造 Geometry。
+
+通用 warmup 只有一张图，因此本配置关闭它。使用成对 smoke 观测真正的首帧、
+热态调用和 HTTP `fused`，不能仅凭端口就绪判断双目推理已就绪。
+
+### 11.4 实测记录（2026-11-11，H20）
+
+官方 RGB 图像对为 960×540，原尺寸、32 次更新，`max_disp=416`、FP16 autocast；
+Python 3.11.13、torch 2.4.1+cu124、timm 1.0.11、xformers 0.0.28.post1。
+该固定源码实际使用 PyTorch SDPA / xformers，真实推理不需要额外安装或编译
+`flash-attn`，因此锁文件未添加它。shell 设置 OMP 4 线程、OpenBLAS 1 线程。
+
+| 阶段/指标 | 一次完整 smoke 的测量 |
+|---|---|
+| 校验资产、启动 worker、加载模型 | 13.39 s |
+| 首次工具调用（不含上述加载） | 1.905 s |
+| 第 2–3 次工具调用（含校正、传输、几何） | 0.828–0.831 s |
+| 热态 GPU forward（CUDA event，不含传输/几何） | 643–644 ms |
+| PyTorch 峰值 allocated 显存 | 3.70 GiB |
+| 通过支持域/对应点过滤的像素 | 469,911 / 518,400（90.65%） |
+| 可见点中位深度 | 0.507 m |
+
+连续三次调用复用同一 worker，Geometry 一致。独立 GPU 测试通过上游
+`run_demo.py` 原始 forward 路径对照像素视差（`rtol=1e-3, atol=1e-3`），并禁止
+该参考进程的 socket connect，验证准备后的加载与推理不依赖临时联网。
+这些数值证明运行与坐标一致性，不是物体定位精度报告。
+
+研究 checkpoint 不只有 tensor，还带 NumPy 标量与 OmegaConf 训练元数据。
+直接 `weights_only=True` 会拒绝它；worker 仅允许清单中实际需要的这些标准类型，
+仍使用 `weights_only=True`，加载后清空 allowlist，不回退到无限制 pickle。
+CPU 测试不加载权重；真实 GPU 测试须显式运行：
+
+```bash
+uv run --extra stereo pytest -m gpu tests/gpu/test_foundation_stereo.py -q
+```
+
+回归结果：默认环境（无 torch/OpenCV）483 passed、6 skipped；带 OpenCV 的 CPU
+全套 595 passed、3 skipped；本模型真实 GPU 测试 2 passed。Ruff、既有 e2e smoke、
+三个环境的 `uv lock --check` 和 lock portability 检查均通过。
+真实 loopback HTTP 覆盖重复调用、空 mask 无 Geometry、缺 checkpoint 和主动终止
+本测试 worker 后的 `unavailable`，并核对 HTTP 与直接工具路径的 Geometry 一致。
+
+## 12. 其余三个神经模型的部署（2026-11-11）
+
+四个调研模型现在均已部署。下表三个新运行时与 SAM3、FoundationStereo 分离，
+所有 PyTorch/CUDA 依赖均留在各自环境，根默认依赖不变。系统 CUDA toolkit 没有替换。
+
+| 模型 | 环境目录 | Python / torch / bundled CUDA | 本地配置 / 服务端口 |
+|---|---|---|---|
+| Fast-FoundationStereo 23-36-37 | `uv_envs/fast-foundation-stereo` | 3.12.13 / 2.6.0+cu124 / 12.4 | `configs/local-fast-foundation-stereo.yaml` / 8792 |
+| MVSAnywhere HERO | `uv_envs/mvsanywhere` | 3.10.20 / 2.1.2+cu118 / 11.8 | `configs/local-mvsanywhere.yaml` / 8794 |
+| DA3-BASE | `uv_envs/da3` | 3.12.13 / 2.11.0+cu128 / 12.8 | `configs/local-da3.yaml` / 8793 |
+
+Fast-FoundationStereo、MVSAnywhere 保留上游兼容栈。DA3 使用官方 PyTorch previous-versions
+页中最新的 cu128 组合（torch 2.11.0 / torchvision 0.26.0 / torchaudio 2.11.0）。
+DA3 上游要求 NumPy<2，而 NumPy 1.26 wheels 不支持 Python 3.13/3.14，因此选择 3.12。
+
+### 12.1 重建与启动
+
+运行目录为本仓库根目录。每个运行时包含 `pyproject.toml`、`uv.lock`、`.python-version`
+和固定源码/权重来源及 SHA256 的 `assets.json`。权重与上游源码放在 ignored 的
+`checkpoints/`、`models/` 中；bootstrap 重跑时验证既有内容，损坏或版本不符时拒绝覆盖。
+
+```bash
+uv sync --project uv_envs/fast-foundation-stereo --locked
+uv_envs/fast-foundation-stereo/.venv/bin/python scripts/bootstrap_fast_foundation_stereo.py
+CUDA_VISIBLE_DEVICES=1 OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=1 uv run --extra stereo python scripts/fast_foundation_stereo_smoke.py --http --upstream
+
+uv sync --project uv_envs/mvsanywhere --locked
+uv_envs/mvsanywhere/.venv/bin/python scripts/bootstrap_mvsanywhere.py
+CUDA_VISIBLE_DEVICES=5 OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=1 uv_envs/mvsanywhere/.venv/bin/python scripts/mvsanywhere_smoke.py --repeats 3
+CUDA_VISIBLE_DEVICES=5 OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=1 uv run python scripts/multiview_smoke.py --config configs/local-mvsanywhere.yaml --http
+
+uv sync --project uv_envs/da3 --locked
+uv_envs/da3/.venv/bin/python scripts/bootstrap_da3.py
+CUDA_VISIBLE_DEVICES=4 OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=1 uv_envs/da3/.venv/bin/python scripts/da3_smoke.py
+CUDA_VISIBLE_DEVICES=4 OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=1 uv run python scripts/multiview_smoke.py --config configs/local-da3.yaml --http
+
+# 选择一个服务常驻；根据 nvidia-smi 选实际空闲卡，端口默认仅绑定 loopback。
+CUDA_VISIBLE_DEVICES=4 OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=1 uv run percepta serve --config configs/local-da3.yaml
+```
+
+`percepta models check --config <上述配置>` 可先检查主 checkpoint 哈希。
+工具加载还校验模型配置；bootstrap 校验源码及离线补丁。模型启动时禁止临时 HF 下载。
+通用单图 warmup 在这些配置中关闭，成对/三视图 smoke 才能证明推理已就绪。
+
+### 12.2 接口与尺度
+
+Fast-FoundationStereo 由 `stereo_backend: ffs` 选择，复用已有校正和双目传输。
+官方模型是结构化剪枝后的完整 pickle；仅在独立 worker 校验清单中的固定官方
+checkpoint SHA 后加载。实际测试 `max_disp=640` 会因 26-token 位置编码维度不足失败，
+因此默认并强制限制为 **416**；未插值位置编码或修改模型。它不覆盖原计划中约
+600 px 的近距 LR 情况，需调整输入分辨率/基线/工作距离后另行验证。
+
+MVSAnywhere 由 `triview_method: mvs`、`triview_backend: mvsanywhere` 选择。
+官方内存 API 支持数组，无需逐请求写目录。每个参考视图联合使用另两路图像，
+输出三张深度图。OpenCV camera-to-world 与该入口一致；内部只消费相对相机变换。
+先在 float64 中计算 `inv(T_world_cam[0]) @ T_world_cam[i]`，再转 float32，
+消除任意世界原点带来的相消误差。输出仍为各原相机 +Z 米制深度，最终世界点
+使用调用方的原始 `T_world_cam`。天空概率只用于排除天空，不能冒充深度置信度。
+本地 DINO/ResNet 初始化不再临时下载，完整 HERO 参数随后严格覆盖全部网络权重。
+
+DA3-BASE 由 `triview_method: mvs`、`triview_backend: da3` 选择。
+先在 float64 中计算 `T_local_cam[i] = inv(T_world_cam[0]) @ T_world_cam[i]`，
+上游接收 `inv(T_local_cam)`。这样不会因大世界坐标转 float32 丢失小基线。
+使用 `align_to_input_ext_scale=True` 将深度绑定到输入标定的米制基线；
+三相机中心必须非共线。严格 safetensors `load_model` 处理
+官方文件中的共享 LayerNorm alias，没有使用 `strict=False`。输出深度/置信度
+重采样回原图坐标，置信度保持原始非负分值，不解释成概率或定位误差。
+在发送请求前检查缩放后是否至少保留一个 14 像素 patch；不支持的长宽比返回
+`invalid_request`，不进入 worker，不影响后续正常推理。
+
+FFS/MVSAnywhere 所需的资产清单也随 wheel 发布，已脱离源码树测试模型加载；
+editable checkout 继续使用 `uv_envs/` 中的同一份清单。各运行时仍单独提供源码和权重。
+后端提供不等待推理锁的故障快照，注册表 introspection 将已失败或已退出的 worker
+标记为 `error`，`/healthz`、`/v1/tools` 和 `/v1/info` 因而反映实际故障。
+
+三视图协议只传 RGB、K、`T_world_cam` 和有限 float32 深度/置信度；不传 pickle，
+不接受请求指定 Python 路径、源码、checkpoint 或 factory。重复/退化相机标定
+在进入模型前拒绝，worker 死亡/超时为 `unavailable`，不会静默替换算法。
+没有有效深度时不输出 Geometry。所有几何均描述可见表面；文本 prompt 本身不选物体。
+三目神经几何的 0.03 m uncertainty 是未校准的占位假设，结果显式标注警告。
+
+### 12.3 本机真实验证
+
+H20 上已验证 CUDA tensor、权重加载、重复推理、常驻进程复用、工具世界几何和
+真实 loopback HTTP；主动终止各自 worker 后返回 `unavailable`。以下为单次记录，
+输入/分辨率不同，不能据此声称模型精度或速度排名。
+
+| 模型与输入 | 热态记录 | 峰值 allocated 显存 |
+|---|---|---|
+| Fast-FoundationStereo，官方 960×540 双目，8 iters / 416 disparity | 工具 286–289 ms；GPU forward 105–106 ms | 2.02 GiB |
+| MVSAnywhere，官方三张 640×480，逐参考联合另两路，1 refinement | 三路深度 adapter 483–486 ms；三次 GPU forward 合计 476–479 ms | 1.47 GiB |
+| DA3-BASE，252×336 三路标定平面，处理为 378×504 | 工具 290 ms；adapter 含处理/传输 230 ms | 1.10 GiB |
+
+Fast-FoundationStereo 视差与禁网下的官方 demo **逐像素相同，最大差 0.0 px**。
+MVSAnywhere 与官方内存入口在相同首相机归一化输入上数值一致；共同旋转/平移
+世界坐标后，相机归一化最大差 8.88e-16，实际深度最大差 **0.0 m**。
+DA3 重复结果一致，输入基线翻倍后深度比为 **2.0**。其合成 1 m 平面预测中位
+深度约 1.102 m，因此尺度绑定验证不能解释成定位精度达标。
+
+详细 JSON 证据在本机 `checkpoints/{fast-foundation-stereo,mvsanywhere,da3}/`，
+不随权重提交。可复现 GPU 检查（每次为对应模型选择空闲 GPU）：
+
+```bash
+CUDA_VISIBLE_DEVICES=1 OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=1 uv run --extra stereo pytest -m gpu tests/gpu/test_fast_foundation_stereo.py -q
+CUDA_VISIBLE_DEVICES=5 OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=1 uv run pytest -m gpu tests/gpu/test_mvsanywhere.py tests/gpu/test_multiview_tools.py -k mvsanywhere -q
+CUDA_VISIBLE_DEVICES=4 OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=1 uv run pytest -m gpu tests/gpu/test_da3.py tests/gpu/test_multiview_tools.py -k da3 -q
+```
+
+六个锁文件的 staleness/official-host 检查通过；CI 现在遍历所有模型锁，并另外
+在含 OpenCV 的 CPU 环境运行回归。基础环境依然不含 torch/OpenCV。
+本轮修复后带 OpenCV 的 CPU 回归为 **661 passed、9 skipped**，Ruff 与既有 e2e 通过；
+部署初验中三个新模型的 **6 项真实 GPU 测试通过**，原 FoundationStereo 的 2 项 GPU 回归也通过。
+本次修复另跑 DA3 的 2 项真实 GPU/HTTP 回归，覆盖大世界原点、拒绝尺寸后复用 worker
+及故障健康状态；独立 wheel 环境完成 FFS 真实推理和 MVSAnywhere 严格权重加载。
+另建不含 torch/OpenCV 的默认环境跑过完整 CPU 回归，并补验最后的可选依赖错误分支。
+Fast-FoundationStereo 与 MVSAnywhere 的研究权重仅供非商业研究，DA3-BASE 为 Apache-2.0。
+本轮交付是模型部署与工具接入，不包含 RoboDojo 的目标定位精度、Policy SR/Score 实测。

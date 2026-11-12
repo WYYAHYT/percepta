@@ -543,3 +543,95 @@ Result (`scripts/footprint_accuracy.py`, cube side 10 cm):
 
 The footprint ratio moved from 1.78–2.93× to 0.65–2.18×. It is still an *upper bound* on a convex
 body — that is what a silhouette hull is — so the remaining excess is expected, not a bug.
+
+## D36 — FoundationStereo is an isolated disparity backend, not a segmenter
+
+The first deployed neural stereo model is FoundationStereo 23-51-11 (research license),
+selected by `stereo_backend="foundation_stereo"`. It is distinct from Fast-FoundationStereo
+(`ffs`, still unavailable). Its Python 3.11 / torch 2.4.1 runtime has its own locked project;
+root dependencies, SAM3's binary protocol and the public schema are unchanged.
+
+The dedicated worker transports two rectified uint8 RGB images and one float32 pixel-disparity
+map. Startup and pipe IO have enforced deadlines; worker failure is `unavailable`, never a
+silent SGBM fallback. Interpreter/source/checkpoint paths come only from trusted deployment
+configuration, not request context. Checkpoint hashes go into provenance.
+
+Geometry uses OpenCV +Z forward. For camera-to-world rotations/centres `Ra,Ca,Rb,Cb`,
+OpenCV stereo rectification receives `R=Rb.T@Ra`, `t=Rb.T@(Ca-Cb)`. RGB and the optional
+original-left mask are actually remapped; both cameras' valid support and the right-image
+correspondence must be valid. Rectified points return through `R1.T` before camera-to-world
+transformation. Explicit left/right order is honoured; unsupported reverse/vertical pairs
+are rejected rather than silently swapping cameras. Triview's pairwise route shares these
+geometry corrections, but gains no neural model in this deployment.
+
+The result summarizes visible points: without `stereo_mask` it describes the scene, not the
+object named by a prompt. Disparity-noise uncertainty remains an assumption, not a measured
+accuracy claim. Real official-image, worker and HTTP smoke checks establish executability and
+coordinate consistency, not task-level accuracy or ground-truth object localization.
+
+The asset manifest pins upstream source, the official checkpoint/config and timm's EdgeNeXt
+backbone. One hash-pinned source patch makes DINO load bundled code instead of fetching a
+remote torch.hub repository. Inference uses the prepared local cache with HF offline mode.
+
+## D37 — Deploy the remaining three depth models in independent runtimes
+
+Fast-FoundationStereo 23-36-37, MVSAnywhere HERO and DA3-BASE each receive a separate
+locked uv project, source/asset manifest, bootstrap, adapter and real GPU smoke. No model
+framework enters the root dependencies or module-level tool imports. Source, checkpoint
+paths and adapter factories are trusted deployment configuration; requests carry RGB and
+calibration only. Existing SAM3 defaults and the public schema remain unchanged.
+
+Fast-FoundationStereo uses `stereo_backend="ffs"` and the existing stereo worker protocol.
+Its official checkpoint is a structurally pruned serialized model; only the exact
+manifest-pinned official bytes may be unpickled in the isolated worker. The unchanged
+checkpoint has 26 positional tokens and supports at most 416 disparity pixels. Actual
+640-pixel inference fails; reject it explicitly instead of interpolating model weights or
+claiming the planned near-range coverage was achieved.
+
+`triview_method="mvs"` with `triview_backend="mvsanywhere"` or `"da3"` uses calibrated
+three-view RGB and returns metric camera +Z depth on the input pixel grid. A bounded
+three-view binary protocol reuses the stereo worker lifecycle, IO deadlines and cleanup.
+Protocol validation rejects nonfinite arrays, invalid rigid calibration and coincident
+camera pairs before inference. Worker errors produce `unavailable`; missing depth produces
+no Geometry. There is no substitute-model fallback.
+
+MVSAnywhere jointly conditions each reference on the other two images. The official
+in-memory API already uses OpenCV camera-to-world poses. Its model consumes only relative
+camera transforms; rebase poses to the first camera in float64 before float32 conversion
+to avoid world-origin cancellation. The world Geometry still uses the caller's original
+`T_world_cam`. Sky probability masks sky; it is not advertised as depth confidence.
+Offline source patches suppress redundant backbone downloads, then the full trained HERO
+state loads strictly. The official checkpoint hash is checked before trusted deserialization.
+
+DA3-BASE uses local safetensors and known world-to-camera poses, with
+`align_to_input_ext_scale=True`. Three non-collinear camera centres are required for its
+Sim(3) alignment; no relative depth is silently interpreted as metres. Safetensors' strict
+`load_model` honors the checkpoint's shared LayerNorm aliases. Raw confidence remains an
+uncalibrated model score. Shared tool Geometry uses an explicit 0.03 m uncertainty assumption,
+with an uncalibrated warning; this value is not measured positioning accuracy.
+
+These models summarize visible surfaces of the supplied scene. Model deployment does not
+implement target segmentation, object completion, automatic camera selection or RoboDojo
+Policy evaluation. Fast-FoundationStereo and HERO checkpoints are research-only; DA3-BASE
+source and weights are Apache-2.0.
+
+## D38 — Preserve workers on invalid DA3 sizes, and package runtime metadata
+
+DA3's image processor can round an extremely short edge to one pixel, which violates the
+model's 14-pixel patch requirement. Validate the processed dimensions before IPC and at
+the direct adapter boundary. A rejected request is `invalid_request`; the resident worker
+and its next valid request remain usable. Runtime/protocol failures remain terminal.
+
+Rebase DA3 camera-to-world poses to the first camera in float64 before the upstream path
+casts poses to float32: `T_local_cam = inv(T_world_cam[0]) @ T_world_cam`. Feed the inverse
+local poses to DA3 and keep the original calibration for final world Geometry. This prevents
+world-origin translation from erasing centimetre-scale baselines; regression checks include
+common translations of 1e6 and 1e7 metres while holding images and relative poses fixed.
+
+The wheel includes the existing FFS and MVSAnywhere asset manifests as package resources.
+Editable source checkouts retain the uv project manifests as their single source. Verify a
+built wheel outside the checkout, and also build a wheel from the source distribution.
+
+Resident backends expose a nonblocking `health_error` snapshot. Registry descriptions record
+terminal failures and idle worker exits as tool `error`, without acquiring the inference lock
+or changing singleton/restart semantics. Service health and introspection share that record.

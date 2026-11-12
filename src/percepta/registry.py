@@ -67,6 +67,18 @@ class ToolEntry:
     lock: threading.RLock = field(default_factory=threading.RLock)
 
     def describe(self) -> dict[str, Any]:
+        """Describe the tool, recording a resident backend's nonblocking failure snapshot.
+
+        Returns:
+            Tool metadata and current load/health status; a failed singleton remains loaded.
+
+        Example:
+            >>> ToolEntry(name="missing", factory=None).describe()["status"]
+            'lazy'
+        """
+        error = getattr(getattr(self.instance, "_backend", None), "health_error", None)
+        if isinstance(error, str) and error:
+            self.status, self.error = "error", error
         return {
             "name": self.name,
             "version": _version(self),

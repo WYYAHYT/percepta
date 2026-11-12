@@ -1,5 +1,12 @@
 # 感知模型调研：能不能装、怎么装、值不值得装
 
+> **部署状态更新（2026-11-11）**：本页下方是部署前的调研快照。
+> FoundationStereo、Fast-FoundationStereo、MVSAnywhere HERO、DA3-BASE 现均有独立运行时、
+> 固定权重和工具接入；真实验证与运行命令见 [模型隔离文档 §12](model-isolation.md#12-其余三个神经模型的部署2026-11-11)。
+> 调研中的两个判断已被实测修正：FoundationStereo 的固定源码无需 flash-attn；
+> Fast-FoundationStereo 的该研究 checkpoint 不能只改参数就运行 640 视差，实际限制为 416。
+> MVSAnywhere 也已找到官方内存 API，无需逐请求写图片目录。
+
 > 调研时间 2026-11-11。对象是 `docs/Percepta_RoboDojo_Agent_Implementation_Plan.md` 里
 > 列出的 D2/D3/D5/D6 四个神经模型。**只做信息核实，没有安装、没有下载权重、没有跑推理。**
 >
@@ -171,8 +178,8 @@ recording_0/
 `transforms.json` 是 NeRF/nerfstudio 格式，包含逐帧的 `transform_matrix`（camera-to-world）
 和 `fl_x/fl_y/cx/cy`。
 
-**这意味着 worker 每次推理都要写临时目录**：3 张 PNG + 1 个 JSON。可行，但比 FoundationStereo
-的"直接喂数组"重。
+这是 CLI demo 的格式要求。**部署核实后改用上游 `hubconf.py` 的内存推理入口**，
+三路数组和标定直接输入模型，每次推理无需写临时目录。
 
 ### 权重
 
@@ -185,7 +192,7 @@ https://storage.googleapis.com/niantic-lon-static/research/mvsanywhere/mvsanywhe
 
 这是四个模型里**权重最容易拿的**。但 `storage.googleapis.com` 在国内可能需代理。
 
-### 坐标约定：必须转换
+### 坐标约定：部署时必须核实
 
 官方原文：
 
@@ -195,9 +202,10 @@ https://storage.googleapis.com/niantic-lon-static/research/mvsanywhere/mvsanywhe
 > include ray information as part of metadata. Other datasets used with these weights should be
 > transformed to the ScanNet system.
 
-**这是最容易出错的地方**：percepta 用 OpenCV 相机系（`T_world_cam`，看向 -z），而权重
-假设 ScanNet 系。**必须做一次明确的坐标变换**，否则深度方向会错——而且不会报错，只会给出
-看起来合理的错误结果。
+percepta 用 OpenCV 相机系（`T_world_cam`，看向 +z）。部署已核实其内存 API 接收
+OpenCV camera-to-world，模型内部只依赖相对位姿，因此本接入无需额外 world 轴翻转。
+为避免大世界坐标在 float32 下的相消误差，先在 float64 中重基到首相机坐标；
+相对标定、米制基线和相机轴保持不变。该约定有数值测试和真实推理核验。
 
 **这条必须写进 worker 的注释和测试里。**
 

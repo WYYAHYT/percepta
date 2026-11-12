@@ -1,0 +1,16 @@
+{
+  "model": "DA3-BASE",
+  "license": "Apache-2.0",
+  "source": {
+    "url": "https://github.com/ByteDance-Seed/Depth-Anything-3",
+    "revision": "3d835ec1a5802d64a8b8b15f817a1ab54809bfe4"
+  },
+  "weights": {
+    "repo_id": "depth-anything/DA3-BASE",
+    "revision": "f4a6c9b3c95e41c82048423d3493a81ec3fa810e",
+    "files": [
+      {"filename": "config.json", "sha256": "5e34115ebc17bd2d8d43033c5f72e9446ac8833fd61d3fa160b7e67e0bb5b7b5"},
+      {"filename": "model.safetensors", "sha256": "e01067dc1659613083d9145a9a2547ccdbe6ccbbf83c4fe7b3e8a4e2bdae78b5"}
+    ]
+  }
+}

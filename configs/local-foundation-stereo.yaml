@@ -1,0 +1,57 @@
+# FoundationStereo 23-51-11 research checkpoint: non-commercial research use only.
+# Run from the repository root; select an available GPU with CUDA_VISIBLE_DEVICES.
+server:
+  host: 127.0.0.1
+  port: 8791
+  max_body_bytes: 33554432
+  max_queue: 2
+  request_timeout_ms: 360000
+  token_env: PERCEPTA_TOKEN
+
+device:
+  cuda_visible_devices: ""
+
+pipeline:
+  default: ["stereo_3d"]
+
+tools:
+  stereo_3d:
+    enabled: true
+    stereo_backend: foundation_stereo
+    backend: subprocess
+    python: uv_envs/foundation-stereo/.venv/bin/python
+    source_dir: models/FoundationStereo
+    checkpoint: checkpoints/foundation-stereo/model_best_bp2.pth
+    checkpoint_sha256: "60e79bde9c6a00acea551625ff814fe06e5a6806e2c0c9829baee248de87c5f1"
+    verify_weights: always
+    model_config: checkpoints/foundation-stereo/cfg.yaml
+    model_config_sha256: "a9d9dd2137c30edc2236194f62df14d222dad5fd3287a33c7540b543bb93853f"
+    hf_cache: checkpoints/foundation-stereo/hf_cache
+    cuda_visible_devices: ""
+    valid_iters: 32
+    startup_timeout_s: 180
+    timeout_s: 120
+    # Assumed disparity noise, not a measured accuracy guarantee.
+    stereo_sigma_d_px: 1.0
+  fake:
+    enabled: false
+  sam3:
+    enabled: false
+  multi_view_3d:
+    enabled: false
+  triview_3d:
+    enabled: false
+
+cache:
+  enabled: false
+
+# The generic warmup has only one image, so it cannot exercise a stereo tool.
+warmup:
+  enabled: false
+
+logging:
+  level: info
+  json: true
+
+metrics:
+  enabled: true

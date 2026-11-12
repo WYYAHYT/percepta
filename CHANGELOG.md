@@ -6,6 +6,50 @@ changed. Every design decision referenced as `D<n>` lives in [`docs/decisions.md
 
 ---
 
+## Unreleased
+
+### Added
+
+* Isolated **FoundationStereo 23-51-11** runtime and the explicit
+  `stereo_backend="foundation_stereo"` route in `stereo_3d` (D36). Pinned source, official
+  research checkpoint/config and auxiliary backbone hashes; repeatable asset bootstrap and
+  offline loading. Research-only license.
+* Deploy **Fast-FoundationStereo 23-36-37**, **MVSAnywhere HERO**, and **DA3-BASE** in separate
+  locked uv projects, with hash-pinned official assets, offline bootstrap, resident workers,
+  GPU smoke tests and local service configurations (D37).
+* `stereo_backend="ffs"` now selects Fast-FoundationStereo; `triview_method="mvs"` selects
+  deployed MVSAnywhere or DA3 metric depth. Three-view RPC reuses the existing bounded worker
+  lifecycle; model paths and factories remain trusted deployment configuration.
+* CI checks every model lockfile and runs an additional CPU suite with the stereo extra.
+* Dedicated two-RGB/float-disparity worker protocol with bounded IO deadlines, resident reuse,
+  worker cleanup and explicit unavailable errors. SAM3's protocol and root dependencies are unchanged.
+* `configs/local-foundation-stereo.yaml` and real GPU / loopback HTTP smoke coverage, including
+  comparison with the upstream demo, empty geometry and missing/crashed worker behavior.
+
+### Fixed
+
+* DA3 rejects image sizes that would leave fewer than one processed patch before sending
+  data to its worker; a rejected request leaves the resident model usable.
+* DA3 rebases camera poses in float64 before upstream float32 conversion, preserving metric
+  depth when the caller changes the world origin, including million-metre coordinates.
+* FFS and MVSAnywhere runtime manifests are included as wheel resources, so model loading
+  also works outside an editable source checkout.
+* Resident worker failures and idle process exits update tool health to `error` without
+  waiting for the inference lock or restarting the failed worker.
+* Stereo now actually remaps both RGB images and the original-left mask, uses the correct
+  camera-relative translation and OpenCV +Z-forward unprojection. Triview's pairwise route shares
+  these corrections. Explicit left/right ordering is honoured; reversed/vertical pairs and
+  out-of-support correspondences cannot silently become valid geometry.
+* Stereo/triview outputs explicitly describe visible-surface statistics and assumed disparity
+  uncertainty, not a complete object reconstruction or measured positioning accuracy.
+* Reject duplicate camera centres and degenerate DA3 pose alignment before model inference;
+  invalid requests cannot poison an otherwise healthy multiview worker.
+
+Measured on one H20 with the official 960×540 pair: 0.828–0.831 s warm tool calls,
+643–644 ms GPU forward, 3.70 GiB peak allocated memory; see `docs/model-isolation.md` §11.
+
+---
+
 ## 0.3.0 — 2026-11-09
 
 The no-depth geometry path was measuring the wrong thing. Accuracy improved by a factor of

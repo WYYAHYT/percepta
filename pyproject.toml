@@ -73,6 +73,10 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/percepta"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"uv_envs/fast-foundation-stereo/assets.json" = "percepta/backends/fast_foundation_stereo_assets.json"
+"uv_envs/mvsanywhere/assets.json" = "percepta/backends/mvsanywhere_assets.json"
+
 [tool.uv]
 # The project is an application/library hybrid: `uv sync` should install the package
 # itself in editable mode so `percepta` and the `percepta.tools` entry points resolve.

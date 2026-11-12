@@ -1,0 +1,38 @@
+# DA3-BASE, Apache-2.0. Three calibrated views with non-collinear camera centres.
+server:
+  host: 127.0.0.1
+  port: 8793
+  max_queue: 2
+  request_timeout_ms: 600000
+device:
+  cuda_visible_devices: ""
+pipeline:
+  default: [triview_3d]
+tools:
+  triview_3d:
+    enabled: true
+    triview_method: mvs
+    triview_backend: da3
+    backend: subprocess
+    python: uv_envs/da3/.venv/bin/python
+    source_dir: models/Depth-Anything-3
+    checkpoint: checkpoints/da3/model.safetensors
+    checkpoint_sha256: "e01067dc1659613083d9145a9a2547ccdbe6ccbbf83c4fe7b3e8a4e2bdae78b5"
+    verify_weights: always
+    model_config: checkpoints/da3/config.json
+    model_config_sha256: "5e34115ebc17bd2d8d43033c5f72e9446ac8833fd61d3fa160b7e67e0bb5b7b5"
+    process_res: 504
+    startup_timeout_s: 300
+    timeout_s: 300
+  fake:
+    enabled: false
+  sam3:
+    enabled: false
+  multi_view_3d:
+    enabled: false
+  stereo_3d:
+    enabled: false
+cache:
+  enabled: false
+warmup:
+  enabled: false

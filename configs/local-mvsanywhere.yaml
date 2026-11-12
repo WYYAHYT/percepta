@@ -1,0 +1,38 @@
+# MVSAnywhere HERO, Niantic non-commercial research license.
+server:
+  host: 127.0.0.1
+  port: 8794
+  max_queue: 2
+  request_timeout_ms: 600000
+device:
+  cuda_visible_devices: ""
+pipeline:
+  default: [triview_3d]
+tools:
+  triview_3d:
+    enabled: true
+    triview_method: mvs
+    triview_backend: mvsanywhere
+    backend: subprocess
+    python: uv_envs/mvsanywhere/.venv/bin/python
+    source_dir: models/mvsanywhere
+    checkpoint: checkpoints/mvsanywhere/mvsanywhere_hero.ckpt
+    checkpoint_sha256: "00878bab903b1d384cd6bb9ea092e247a9036d429cb8bcc3d6dcbb81f67e556d"
+    verify_weights: always
+    image_height: 480
+    image_width: 640
+    num_refinement_steps: 1
+    startup_timeout_s: 300
+    timeout_s: 300
+  fake:
+    enabled: false
+  sam3:
+    enabled: false
+  multi_view_3d:
+    enabled: false
+  stereo_3d:
+    enabled: false
+cache:
+  enabled: false
+warmup:
+  enabled: false

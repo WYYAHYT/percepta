@@ -1,0 +1,38 @@
+{
+  "model": "Fast-FoundationStereo 23-36-37",
+  "license": "non-commercial research only (upstream LICENSE.txt)",
+  "source": {
+    "url": "https://github.com/NVlabs/Fast-FoundationStereo",
+    "revision": "476f4249561f7c79ca707326954f9255643412a6",
+    "files": [
+      {
+        "filename": "core/foundation_stereo.py",
+        "sha256": "babfa6ef419ff0406c92227325902d7172bb6cdcccc66f265cfb53e53618f4e4"
+      },
+      {
+        "filename": "scripts/run_demo.py",
+        "sha256": "c8885986196c8d2e6af958a773c0470a317b62576c775ddbe26ce6cb2a6c3996"
+      },
+      {
+        "filename": "LICENSE.txt",
+        "sha256": "045b564ebafefaa863beec07c5acdcfa8d99cefbbd060c22865bc4613318ddd6"
+      }
+    ]
+  },
+  "checkpoint_assets": [
+    {
+      "filename": "cfg.yaml",
+      "google_drive_id": "1GDBRYL-ZaLpXEtWfGFRJvkBc_2sywjgj",
+      "sha256": "d45afe99b176454d5aff416edf16c8da6a99579f8f374b927f37907442a7d6bc"
+    },
+    {
+      "filename": "model_best_bp2_serialize.pth",
+      "google_drive_id": "1W1V1H64l9bAi97boEQQ2ueNzzGmSMz-E",
+      "sha256": "af0658f289ec840b292645f8d5538978f06e8cabaa1fd31e84acc91af268e990"
+    }
+  ],
+  "max_disp_limit": 416,
+  "max_disp_limit_reason": "serialized positional encodings contain 26 (=416/16) tokens; 640 fails without model surgery",
+  "serialization": "official full pruned model; verify pinned SHA256 before isolated trusted pickle loading",
+  "backbone": "bundled in serialized model; no runtime network download"
+}

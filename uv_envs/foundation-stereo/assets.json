@@ -1,0 +1,40 @@
+{
+  "model": "FoundationStereo 23-51-11 (ViT-large)",
+  "license": "non-commercial research only",
+  "source": {
+    "url": "https://github.com/NVlabs/FoundationStereo",
+    "revision": "6e8806816b533e4d13ddbb95ffa907b797060a62",
+    "offline_dino_patch": {
+      "path": "depth_anything/dpt.py",
+      "original": "self.pretrained = torch.hub.load('facebookresearch/dinov2', 'dinov2_{:}14'.format(encoder), pretrained=pretrained_dino)",
+      "replacement": "self.pretrained = torch.hub.load(os.path.join(code_dir, '..', 'dinov2'), 'dinov2_{:}14'.format(encoder), source='local', pretrained=pretrained_dino)",
+      "sha256": "450cf424ea490f877c0e59a5bce9b40a437f4330488458824f451312080cba52"
+    }
+  },
+  "checkpoint_assets": [
+    {
+      "filename": "cfg.yaml",
+      "google_drive_id": "1tidGICH1_kTUUqi42aboKscuMY4IK_Xr",
+      "sha256": "a9d9dd2137c30edc2236194f62df14d222dad5fd3287a33c7540b543bb93853f"
+    },
+    {
+      "filename": "model_best_bp2.pth",
+      "google_drive_id": "1Yh_2o9QCUrVqZrnAXZ7RUr0zTp3JrMKe",
+      "sha256": "60e79bde9c6a00acea551625ff814fe06e5a6806e2c0c9829baee248de87c5f1"
+    }
+  ],
+  "backbone": {
+    "repo_id": "timm/edgenext_small.usi_in1k",
+    "revision": "81bd8f2ee56330bdf6a7a2e47e1b2b82eb34f978",
+    "files": [
+      {
+        "filename": "config.json",
+        "sha256": "b54bfbaace517e4c96e68b7215cefd793472938ca89882c305967be74e6d790e"
+      },
+      {
+        "filename": "model.safetensors",
+        "sha256": "14d824931ca7f09e631c90347253bbc7a925ad017a02d7b8bf6e13b872d8059b"
+      }
+    ]
+  }
+}

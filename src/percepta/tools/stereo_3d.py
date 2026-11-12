@@ -13,22 +13,21 @@ exactly what the caller supplied, and this tool consumes them. Two views in, met
 ``Geometry`` out.
 
 It does not pick a pair behind the caller's back, does not fall back to another method, and does
-not invent a result when the pair cannot work: with no usable input it returns ``[]`` -- the
-convention a geometry-kind tool uses for "no geometry" -- after logging a specific failure code.
+not invent a result when the pair cannot work: no usable depth returns ``[]`` (no geometry).
+Malformed input returns an ``invalid_request`` percept with a specific failure code.
 
-Two backends, one contract
---------------------------
-``stereo_backend="sgbm"`` uses OpenCV's semi-global matcher: no weights, no GPU, runs anywhere,
-and is the honest baseline for "can stereo help at all here". ``"ffs"`` is the seam for a neural
-matcher (Fast-FoundationStereo) and reports ``backend_not_configured`` until weights are wired,
-rather than silently doing something else.
+Disparity backends
+-----------------
+``stereo_backend="sgbm"`` uses OpenCV without weights or a GPU. ``"foundation_stereo"`` uses
+an isolated, preconfigured model worker. ``"ffs"`` selects the separately deployed
+Fast-FoundationStereo model; it is not an alias and never silently falls back.
 
 What is reported rather than assumed
 ------------------------------------
 Disparity in the rectified frame maps to depth as ``Z = f * B / d``. ``f`` is the *rectified*
-focal, not either camera's own ``fx``, and ``B`` is the baseline norm in the first camera's
-frame. Both are derived from the supplied calibrations and echoed in ``extras``, so the
-stereo-ness of a result can be checked from the output alone.
+focal, not either camera's own ``fx``, and ``B`` is the positive, signed horizontal baseline
+from the rectified projection matrices. Reversed and vertical pairs are rejected, never swapped.
+The geometry summarizes matched visible surfaces, not a reconstructed object's shape.
 """
 
 from __future__ import annotations
@@ -39,6 +38,8 @@ from typing import Any
 import numpy as np
 
 from .. import geometry as geo
+from ..backends.base import BackendRequestError, BackendUnavailable
+from ..backends.foundation_stereo_backend import FoundationStereoBackend
 from ..schema import (
     Calibration,
     Geometry,
@@ -47,7 +48,8 @@ from ..schema import (
     ToolCapabilities,
     ToolContext,
 )
-from .base import BaseTool, make_percept
+from ..weights import WeightError, resolve_weights
+from .base import BaseTool, ToolUnavailable, make_percept
 
 TOOL_NAME = "stereo_3d"
 TOOL_VERSION = "0.1.0"
@@ -59,6 +61,66 @@ ERR_NO_OVERLAP = "no_overlap"
 ERR_LOW_VALID_FRACTION = "low_valid_fraction"
 ERR_BACKEND_NOT_CONFIGURED = "backend_not_configured"
 ERR_INVALID_CALIBRATION = "invalid_calibration"
+ERR_INVALID_ORDER = "invalid_stereo_order"
+ERR_REVERSED_ORDER = "reversed_stereo_order"
+ERR_VERTICAL_RECTIFICATION = "vertical_rectification_unsupported"
+ERR_INVALID_MASK = "invalid_stereo_mask"
+
+
+class _StereoInputError(ValueError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _error_percept(
+    tool: BaseTool,
+    ctx: ToolContext,
+    started: float,
+    code: str,
+    message: str,
+    *,
+    status: str = "invalid_request",
+) -> list[Percept]:
+    """Keep input/backend errors distinct from an empty, usable-depth result."""
+    return [
+        make_percept(
+            percept_id=f"{tool.name}-error",
+            status=status,
+            message=message,
+            provenance=tool._provenance(ctx, started),
+            extras={"code": code},
+        )
+    ]
+
+
+def _validate_calibration(cal: Calibration, image_shape: tuple[int, int]) -> None:
+    """Validate pinhole K and rigid camera->world T (p_world = T @ p_cam_h)."""
+    K = np.asarray(cal.K, dtype=np.float64)
+    T = np.asarray(cal.T_world_cam, dtype=np.float64)
+    if tuple(image_shape) != (cal.height, cal.width):
+        raise _StereoInputError(
+            ERR_INVALID_CALIBRATION, f"{cal.camera}: image/calibration size mismatch"
+        )
+    if (
+        K.shape != (3, 3)
+        or not np.isfinite(K).all()
+        or K[0, 0] <= 0
+        or K[1, 1] <= 0
+        or not np.allclose(K[2], [0, 0, 1], atol=1e-8, rtol=0)
+        or not np.allclose([K[0, 1], K[1, 0]], 0, atol=1e-8, rtol=0)
+    ):
+        raise _StereoInputError(
+            ERR_INVALID_CALIBRATION, f"{cal.camera}: invalid pinhole intrinsics"
+        )
+    if (
+        T.shape != (4, 4)
+        or not np.isfinite(T).all()
+        or not np.allclose(T[3], [0, 0, 0, 1], atol=1e-8, rtol=0)
+        or not np.allclose(T[:3, :3].T @ T[:3, :3], np.eye(3), atol=1e-6, rtol=0)
+        or not np.isclose(np.linalg.det(T[:3, :3]), 1.0, atol=1e-6, rtol=0)
+    ):
+        raise _StereoInputError(ERR_INVALID_CALIBRATION, f"{cal.camera}: T_world_cam must be rigid")
 
 
 def _sgbm_disparity(
@@ -97,42 +159,188 @@ def _sgbm_disparity(
 def _rectify(
     cal_a: Calibration, cal_b: Calibration, image_shape: tuple[int, int]
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
-    """Rectified intrinsics, the rotation for camera A, and the derived baseline.
+    """Return K_rect, R1 and both views' rectification matrices, maps and support.
 
-    ``Calibration`` carries no distortion coefficients -- RoboDojo's cameras are simulated
-    pinholes -- so this rectifies orientation only. The returned rotation takes points in A's
-    camera frame into the rectified frame; its transpose recovers A's frame for unprojection.
+    OpenCV camera A -> B: p_b = R_b.T @ R_a @ p_a + R_b.T @ (C_a - C_b).
+    R1/R2 rotate original +z camera points into rectified +z frames; P1/P2/Q
+    describe those frames. Maps take rectified output pixels to raw input pixels.
+    Calibration has no distortion (spec §4). Only positive horizontal disparity is supported.
     """
     import cv2
 
+    _validate_calibration(cal_a, image_shape)
+    _validate_calibration(cal_b, image_shape)
     Ta = np.asarray(cal_a.T_world_cam, dtype=np.float64)
     Tb = np.asarray(cal_b.T_world_cam, dtype=np.float64)
     Ka = np.asarray(cal_a.K, dtype=np.float64)
     Kb = np.asarray(cal_b.K, dtype=np.float64)
 
     R_ab = Tb[:3, :3].T @ Ta[:3, :3]
-    t_ab = Ta[:3, :3].T @ (Tb[:3, 3] - Ta[:3, 3])
+    t_ab = Tb[:3, :3].T @ (Ta[:3, 3] - Tb[:3, 3])
+    if np.linalg.norm(t_ab) <= 1e-9:
+        raise _StereoInputError(ERR_INVALID_CALIBRATION, "coincident camera centres")
     height, width = image_shape
+    size = (int(width), int(height))
+    try:
+        R1, R2, P1, P2, Q, roi1, roi2 = cv2.stereoRectify(
+            Ka,
+            np.zeros(5),
+            Kb,
+            np.zeros(5),
+            size,
+            R_ab,
+            t_ab.reshape(3, 1),
+            flags=cv2.CALIB_ZERO_DISPARITY,
+            alpha=0,
+        )
+    except cv2.error as exc:
+        raise _StereoInputError(ERR_INVALID_CALIBRATION, f"rectification failed: {exc}") from exc
+    if not all(np.isfinite(m).all() for m in (R1, R2, P1, P2, Q)):
+        raise _StereoInputError(ERR_INVALID_CALIBRATION, "non-finite rectification matrices")
+    if min(P1[0, 0], P1[1, 1], P2[0, 0], P2[1, 1]) <= 0:
+        raise _StereoInputError(ERR_INVALID_CALIBRATION, "rectified focal must be positive")
+    if not np.allclose(P1[:, :3], P2[:, :3], atol=1e-7, rtol=1e-7):
+        raise _StereoInputError(ERR_INVALID_CALIBRATION, "rectified intrinsics must agree")
+    if abs(P2[1, 3] / P2[1, 1] - P1[1, 3] / P1[1, 1]) > 1e-9:
+        raise _StereoInputError(
+            ERR_VERTICAL_RECTIFICATION, "horizontal stereo cannot match a vertical pair"
+        )
+    baseline = float(P1[0, 3] / P1[0, 0] - P2[0, 3] / P2[0, 0])
+    if not np.isfinite(baseline) or not np.isfinite(float(P1[0, 0]) * baseline):
+        raise _StereoInputError(
+            ERR_INVALID_CALIBRATION, "non-finite rectified baseline/focal product"
+        )
+    if baseline < -1e-9:
+        raise _StereoInputError(
+            ERR_REVERSED_ORDER, "right camera is left of left camera; supply the correct order"
+        )
+    if baseline <= 1e-9:
+        raise _StereoInputError(ERR_INVALID_CALIBRATION, "degenerate rectified baseline")
 
-    R1, _R2, P1, _P2, _Q, _roi1, _roi2 = cv2.stereoRectify(
-        Ka,
-        np.zeros(5),
-        Kb,
-        np.zeros(5),
-        (int(width), int(height)),
-        R_ab,
-        t_ab.reshape(3, 1),
-        flags=cv2.CALIB_ZERO_DISPARITY,
-        alpha=0,
-    )
+    map_a = cv2.initUndistortRectifyMap(Ka, None, R1, P1, size, cv2.CV_32FC1)
+    map_b = cv2.initUndistortRectifyMap(Kb, None, R2, P2, size, cv2.CV_32FC1)
+    # A pixel is supported only if the whole bilinear sampling footprint is in the source.
+    source_support = np.ones(image_shape, np.float32)
+    support = [
+        cv2.remap(
+            source_support, *maps, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0
+        )
+        == 1.0
+        for maps in (map_a, map_b)
+    ]
     K_rect = np.asarray(P1[:3, :3], dtype=np.float64)
     info = {
         "focal_rect_px": float(P1[0, 0]),
-        "baseline_m": float(np.linalg.norm(t_ab)),
+        "baseline_m": baseline,
         "R_a_to_rect": R1,
+        "R_b_to_rect": R2,
+        "P1": P1,
+        "P2": P2,
+        "Q": Q,
+        "roi_a": roi1,
+        "roi_b": roi2,
+        "map_a": map_a,
+        "map_b": map_b,
+        "support_a": support[0],
+        "support_b": support[1],
         "original_fx": {"a": float(Ka[0, 0]), "b": float(Kb[0, 0])},
     }
     return K_rect, R1, info
+
+
+def _remap_pair(
+    image_a: np.ndarray,
+    image_b: np.ndarray,
+    info: dict[str, Any],
+    left_mask: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+    """Raw RGB/mask -> rectified pixels; RGB is bilinear, the left mask nearest-neighbour."""
+    import cv2
+
+    if left_mask is not None:
+        try:
+            left_mask = np.asarray(left_mask)
+            if left_mask.shape != image_a.shape[:2]:
+                raise ValueError("left mask must have the original left image's (H, W)")
+            if left_mask.dtype.kind not in "buif" or not np.isfinite(left_mask).all():
+                raise ValueError("left mask must contain finite boolean/0/1 values")
+            if not np.isin(left_mask, [0, 1]).all():
+                raise ValueError("left mask must contain boolean/0/1 values")
+        except (TypeError, ValueError) as exc:
+            raise _StereoInputError(ERR_INVALID_MASK, str(exc)) from exc
+        left_mask = cv2.remap(
+            left_mask.astype(np.uint8),
+            *info["map_a"],
+            cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        ).astype(bool)
+    rect_a = cv2.remap(
+        image_a, *info["map_a"], cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0
+    )
+    rect_b = cv2.remap(
+        image_b, *info["map_b"], cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0
+    )
+    return rect_a, rect_b, left_mask
+
+
+def _rectified_to_world(uv, depth, K_rect, R_a_to_rect, T_world_a) -> np.ndarray:
+    """Rectified pixels + positive Z -> world metres (OpenCV +z).
+
+    p_rect = unproject(uv, Z, K_rect); p_world = R_world_a @ R1.T @ p_rect + C_a.
+    """
+    rect_pts = geo.unproject_pixels(uv, depth, K_rect)
+    T = np.asarray(T_world_a, dtype=np.float64)
+    a_pts = rect_pts @ np.asarray(R_a_to_rect)
+    return a_pts @ T[:3, :3].T + T[:3, 3]
+
+
+def _disparity_points(
+    disparity: np.ndarray,
+    valid: np.ndarray,
+    cal_a: Calibration,
+    cal_b: Calibration,
+    K_rect: np.ndarray,
+    info: dict[str, Any],
+    left_mask: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Rectified disparity -> world points, rectified Z and final (H,W) validity.
+
+    Z = f*B/d, u_right = u_left-d. Both remap footprints and the right subpixel
+    correspondence must be supported. Reject points behind either original +z camera.
+    Points/depth follow row-major order of the returned validity mask.
+    """
+    valid = np.asarray(valid, dtype=bool) & info["support_a"]
+    valid &= np.isfinite(disparity) & (disparity > 0)
+    if left_mask is not None:
+        valid &= left_mask
+    rows, cols = np.nonzero(valid)
+    right_u = cols - disparity[rows, cols].astype(np.float64)
+    inside = (right_u >= 0) & (right_u <= disparity.shape[1] - 1)
+    rows, cols, right_u = rows[inside], cols[inside], right_u[inside]
+    supported = (
+        info["support_b"][rows, np.floor(right_u).astype(int)]
+        & info["support_b"][rows, np.ceil(right_u).astype(int)]
+    )
+    rows, cols = rows[supported], cols[supported]
+    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+        dist = info["focal_rect_px"] * info["baseline_m"] / disparity[rows, cols].astype(np.float64)
+        world = _rectified_to_world(
+            np.column_stack((cols, rows)),
+            dist,
+            K_rect,
+            info["R_a_to_rect"],
+            cal_a.T_world_cam,
+        )
+    keep = np.isfinite(world).all(axis=1) & np.isfinite(dist) & (dist > 0)
+    # Only transform finite points, avoiding invalid arithmetic for infinite depth.
+    for cal in (cal_a, cal_b):
+        front = np.zeros(keep.shape, dtype=bool)
+        front[keep] = geo.world_to_camera(world[keep], cal.T_world_cam)[:, 2] > 0
+        keep &= front
+    valid = np.zeros(disparity.shape, dtype=bool)
+    valid[rows[keep], cols[keep]] = True
+    return world[keep], dist[keep], valid
 
 
 class Stereo3DTool(BaseTool):
@@ -140,15 +348,16 @@ class Stereo3DTool(BaseTool):
 
     Parameters the policy may pass through ``context``:
 
-    * ``stereo_left`` / ``stereo_right`` -- camera names. Required when more than two calibrated
-      views are supplied; with exactly two the tool uses the only pair that exists. With three
-      it refuses to guess, because picking a pair would silently discard the caller's choice.
-    * ``stereo_backend`` -- ``"sgbm"`` (default) or ``"ffs"``.
+    * ``stereo_left`` / ``stereo_right`` -- optional ordered camera names. Supply both, naming
+      exactly the two supplied images/calibrations. Absent, use sorted camera names; the signed
+      baseline must still be positive. Extra views, reversed or vertical pairs are rejected.
+    * ``stereo_backend`` -- ``"sgbm"`` (default), deployed ``"foundation_stereo"``, or ``"ffs"``.
     * ``stereo_num_disparities`` -- search range, multiple of 16. It must cover ``f*B/Z`` for the
       nearest distance of interest: about 400 px at 0.6 m on RoboDojo's rig.
     * ``stereo_block_size`` -- matcher window; forced odd.
-    * ``stereo_mask`` -- optional ``{camera: bool array}`` limiting which pixels count, so a
-      caller that already segmented the target gets object-local depth.
+    * ``stereo_mask`` -- optional ``{camera: bool array}``; only the selected left camera's mask
+      is consumed. It must match the raw image size and is rectified with nearest-neighbour
+      sampling before limiting the visible-surface points. Right masks are not used.
     * ``stereo_sigma_d_px`` -- assumed disparity noise, default 1.0.
     * ``min_valid_fraction`` -- below this the tool reports ``low_valid_fraction`` rather than a
       confident-looking geometry built on almost no points.
@@ -170,10 +379,76 @@ class Stereo3DTool(BaseTool):
             geometry=True,
         )
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._backend: FoundationStereoBackend | None = None
+        self._model_sha256: str | None = None
+        self._config_sha256: str | None = None
+        self._deployed_backend: str | None = None
+
     def load(self, config: dict[str, Any] | None = None) -> None:
-        import cv2  # noqa: F401  the SGBM backend needs OpenCV present
+        try:
+            import cv2  # noqa: F401
+        except ImportError as exc:
+            raise ToolUnavailable("stereo_3d requires the stereo extra (OpenCV)") from exc
 
         super().load(config or {})
+        backend = str(self.config.get("stereo_backend", "sgbm")).lower()
+        if backend not in {"foundation_stereo", "ffs"}:
+            return
+        model_name = "FoundationStereo" if backend == "foundation_stereo" else "Fast-FoundationStereo"
+        try:
+            weights = resolve_weights(
+                self.config.get("checkpoint"), config=self.config,
+                verify=self.config.get("verify_weights", "if-declared"),
+                what=f"{model_name} checkpoint",
+            )
+            if weights.path is None:
+                raise WeightError(f"{model_name} requires a local checkpoint")
+            model_config = resolve_weights(
+                self.config.get("model_config", str(weights.path.with_name("cfg.yaml"))),
+                expected_sha256=self.config.get("model_config_sha256"),
+                verify=self.config.get("verify_weights", "if-declared"),
+                what=f"{model_name} model config",
+            )
+            if model_config.path is None:
+                raise WeightError(f"{model_name} requires a local model config")
+            self._model_sha256 = weights.observed_sha256
+            self._config_sha256 = model_config.observed_sha256
+            factory = {}
+            if backend == "ffs":
+                factory = {
+                    "backend_factory": "percepta.backends.fast_foundation_stereo_worker:FastFoundationStereoAdapter",
+                    "backend_args": {
+                        "source_dir": self.config.get("source_dir"), "checkpoint": str(weights.path),
+                        "model_config": str(model_config.path), "valid_iters": self.config.get("valid_iters", 8),
+                        "max_disp": self.config.get("max_disp", 416),
+                    },
+                }
+            runtime = "foundation-stereo" if backend == "foundation_stereo" else "fast-foundation-stereo"
+            self._backend = FoundationStereoBackend(
+                python=self.config.get("python", f"uv_envs/{runtime}/.venv/bin/python"),
+                source_dir=self.config.get("source_dir"),
+                checkpoint=str(weights.path), model_config=str(model_config.path),
+                hf_cache=self.config.get("hf_cache"),
+                valid_iters=self.config.get("valid_iters", 32),
+                cuda_visible_devices=self.config.get("cuda_visible_devices"),
+                startup_timeout_s=self.config.get("startup_timeout_s", 180),
+                timeout_s=self.config.get("timeout_s", 120),
+                **factory,
+            )
+            self._backend.name = backend
+            self._backend.start()
+            self._deployed_backend = backend
+        except (WeightError, BackendUnavailable, BackendRequestError, OSError, ValueError) as exc:
+            self.close()
+            raise ToolUnavailable(str(exc)) from exc
+
+    def close(self) -> None:
+        if self._backend is not None:
+            self._backend.close()
+            self._backend = None
+        self._deployed_backend = None
 
     def perceive(self, ctx: ToolContext, prompts: list[Prompt]) -> list[Percept]:
         _ = prompts
@@ -182,111 +457,140 @@ class Stereo3DTool(BaseTool):
         for key, value in (self.config or {}).items():
             context.setdefault(key, value)
 
-        calibrated = {
-            name: cal for name, cal in (ctx.calibration or {}).items() if name in ctx.images
-        }
-        # Exactly two views. A stereo tool that quietly accepted three would have to choose a
-        # pair, which means silently discarding a camera the caller passed -- the caller's
-        # decision, not the tool's. Three views belong to `triview_3d`.
-        if len(calibrated) != 2:
-            self._log(
+        calibrated = ctx.calibration
+        if len(ctx.images) != 2 or set(calibrated) != set(ctx.images):
+            return _error_percept(
+                self,
                 ctx,
-                f"{ERR_NEEDS_TWO_VIEWS}: stereo_3d takes exactly 2 calibrated views, got "
-                f"{len(calibrated)} (images={sorted(ctx.images)}, "
-                f"calibrated={sorted(ctx.calibration or {})}); use triview_3d for three",
-                level="warning",
+                started,
+                ERR_NEEDS_TWO_VIEWS,
+                "stereo_3d requires exactly two images and the same two calibrations; no pair selection",
             )
-            return []
-
         left_name, right_name = sorted(calibrated)
+        if "stereo_left" in context or "stereo_right" in context:
+            left_name, right_name = context.get("stereo_left"), context.get("stereo_right")
+            if (
+                not isinstance(left_name, str)
+                or not isinstance(right_name, str)
+                or left_name == right_name
+                or {left_name, right_name} != set(ctx.images)
+            ):
+                return _error_percept(
+                    self,
+                    ctx,
+                    started,
+                    ERR_INVALID_ORDER,
+                    "stereo_left and stereo_right must name exactly the supplied pair, once each",
+                )
 
         backend = str(context.get("stereo_backend", "sgbm")).lower()
-        if backend != "sgbm":
+        if backend == "foundation_stereo" and self._backend is None:
+            raise ToolUnavailable("FoundationStereo is not loaded in this deployment")
+        if backend not in {"sgbm", "foundation_stereo", "ffs"} or (
+            backend in {"foundation_stereo", "ffs"} and backend != self._deployed_backend
+        ):
             self._log(
                 ctx,
                 f"{ERR_BACKEND_NOT_CONFIGURED}: backend {backend!r} is not wired yet; "
                 "'sgbm' is available",
                 level="warning",
             )
-            return []
+            return _error_percept(
+                self,
+                ctx,
+                started,
+                ERR_BACKEND_NOT_CONFIGURED,
+                f"backend {backend!r} is not configured",
+                status="unavailable",
+            )
 
         cal_l, cal_r = calibrated[left_name], calibrated[right_name]
         image_l = np.asarray(ctx.images[left_name])
         image_r = np.asarray(ctx.images[right_name])
+        for name, cal, image in ((left_name, cal_l, image_l), (right_name, cal_r, image_r)):
+            if cal.camera != name:
+                return _error_percept(
+                    self,
+                    ctx,
+                    started,
+                    ERR_INVALID_CALIBRATION,
+                    f"calibration key {name!r} differs from camera {cal.camera!r}",
+                )
+            if image.ndim != 3 or image.shape[2] != 3 or image.dtype != np.uint8:
+                return _error_percept(
+                    self,
+                    ctx,
+                    started,
+                    ERR_INVALID_CALIBRATION,
+                    f"{name}: expected uint8 RGB image",
+                )
         if image_l.shape[:2] != image_r.shape[:2]:
-            self._log(
+            return _error_percept(
+                self,
                 ctx,
-                f"{ERR_NO_OVERLAP}: image sizes differ, {left_name} {image_l.shape[:2]} vs "
-                f"{right_name} {image_r.shape[:2]}",
-                level="warning",
+                started,
+                ERR_INVALID_CALIBRATION,
+                "stereo image sizes must agree",
             )
-            return []
-
-        num_disparities = int(context.get("stereo_num_disparities", 640))
-        if num_disparities <= 0 or num_disparities % 16 != 0:
-            num_disparities = max(16, (num_disparities // 16) * 16)
-        # A search range wider than the image is meaningless and makes OpenCV allocate a volume
-        # far larger than memory (it asks for width-derived buffers of that width). Clamp it and
-        # say so: silently shrinking a caller's parameter would hide a real mismatch between the
-        # request and the images.
-        # OpenCV needs the window to end strictly inside the image: equal to the width asserts.
-        width_limit = 16 * (int(image_l.shape[1]) // 16) - 16
-        if num_disparities > width_limit:
-            self._log(
-                ctx,
-                f"stereo_num_disparities {num_disparities} exceeds the image width "
-                f"{image_l.shape[1]}; clamping to {width_limit}",
-                level="warning",
-            )
-            num_disparities = max(16, width_limit)
-        block_size = int(context.get("stereo_block_size", 5))
-        if block_size % 2 == 0:
-            block_size += 1
-
         try:
             K_rect, _R_a, info = _rectify(cal_l, cal_r, image_l.shape[:2])
-        except Exception as exc:
-            self._log(ctx, f"{ERR_INVALID_CALIBRATION}: {exc!r}", level="warning")
-            return []
+            masks = context.get("stereo_mask")
+            if masks is not None and not isinstance(masks, dict):
+                raise _StereoInputError(
+                    ERR_INVALID_MASK, "stereo_mask must map camera names to masks"
+                )
+            if masks is not None and set(masks) - set(ctx.images):
+                raise _StereoInputError(ERR_INVALID_MASK, "stereo_mask contains an unknown camera")
+            mask = masks.get(left_name) if masks is not None else None
+            rect_l, rect_r, mask = _remap_pair(image_l, image_r, info, mask)
+        except _StereoInputError as exc:
+            return _error_percept(self, ctx, started, exc.code, str(exc))
 
         focal = info["focal_rect_px"]
         baseline = info["baseline_m"]
-        if not np.isfinite(focal) or not np.isfinite(baseline) or focal <= 0 or baseline <= 0:
-            self._log(
-                ctx,
-                f"{ERR_INVALID_CALIBRATION}: degenerate pair focal={focal} baseline={baseline}",
-                level="warning",
-            )
-            return []
-
-        need_06 = focal * baseline / 0.6
-        if num_disparities < need_06:
-            self._log(
-                ctx,
-                f"stereo search range {num_disparities} px is below the ~{need_06:.0f} px this "
-                "pair needs at 0.6 m; near objects will not match",
-                level="warning",
-            )
-
-        disparity, valid = _sgbm_disparity(
-            image_l, image_r, num_disparities=num_disparities, block_size=block_size
-        )
-
-        mask = (context.get("stereo_mask") or {}).get(left_name)
-        if mask is not None:
-            mask_arr = np.asarray(mask, dtype=bool)
-            if mask_arr.shape != valid.shape:
+        if backend in {"foundation_stereo", "ffs"}:
+            try:
+                disparity = self._backend.infer_pair(rect_l, rect_r)
+            except (BackendUnavailable, BackendRequestError) as exc:
+                raise ToolUnavailable(str(exc)) from exc
+            valid = np.isfinite(disparity) & (disparity > 0)
+            backend_details = {
+                "runtime": self._backend.describe(),
+                "model_config_sha256": self._config_sha256,
+            }
+        else:
+            num_disparities = int(context.get("stereo_num_disparities", 640))
+            if num_disparities <= 0 or num_disparities % 16 != 0:
+                num_disparities = max(16, (num_disparities // 16) * 16)
+            # OpenCV needs the search window to end strictly inside the image.
+            width_limit = 16 * (int(image_l.shape[1]) // 16) - 16
+            if num_disparities > width_limit:
                 self._log(
                     ctx,
-                    f"stereo_mask shape {mask_arr.shape} != image {valid.shape}; ignoring",
+                    f"stereo_num_disparities {num_disparities} exceeds the image width "
+                    f"{image_l.shape[1]}; clamping to {width_limit}",
                     level="warning",
                 )
-            else:
-                valid = valid & mask_arr
-
+                num_disparities = max(16, width_limit)
+            block_size = int(context.get("stereo_block_size", 5))
+            if block_size % 2 == 0:
+                block_size += 1
+            need_06 = focal * baseline / 0.6
+            if num_disparities < need_06:
+                self._log(
+                    ctx,
+                    f"stereo search range {num_disparities} px is below the ~{need_06:.0f} px this "
+                    "pair needs at 0.6 m; near objects will not match",
+                    level="warning",
+                )
+            disparity, valid = _sgbm_disparity(
+                rect_l, rect_r, num_disparities=num_disparities, block_size=block_size
+            )
+            backend_details = {"num_disparities": num_disparities, "block_size": block_size}
+        world, dist, valid = _disparity_points(disparity, valid, cal_l, cal_r, K_rect, info, mask)
         valid_fraction = float(valid.mean())
         min_valid = float(context.get("min_valid_fraction", 0.01))
-        if valid_fraction < min_valid:
+        if dist.size == 0 or valid_fraction < min_valid:
             self._log(
                 ctx,
                 f"{ERR_LOW_VALID_FRACTION}: only {valid_fraction * 100:.2f}% of pixels matched "
@@ -294,31 +598,6 @@ class Stereo3DTool(BaseTool):
                 level="warning",
             )
             return []
-
-        depth = np.full(disparity.shape, np.nan, dtype=np.float64)
-        np.divide(focal * baseline, disparity, out=depth, where=valid)
-
-        rows, cols = np.nonzero(valid)
-        dist = depth[rows, cols]
-        keep = np.isfinite(dist) & (dist > 0.0)
-        rows, cols, dist = rows[keep], cols[keep], dist[keep]
-        if rows.size == 0:
-            self._log(ctx, f"{ERR_LOW_VALID_FRACTION}: no finite depth values", level="warning")
-            return []
-
-        # Unproject in the rectified frame, rotate back to camera A, lift to the world.
-        K_rect_inv = np.linalg.inv(K_rect)
-        rays = np.stack(
-            [cols.astype(np.float64), rows.astype(np.float64), np.ones(rows.size)], axis=1
-        )
-        # ``dist`` is distance along the optical axis, and the camera convention (spec §4) is
-        # that optical axis is -z. Multiplying a +z ray by a positive depth would place every
-        # point BEHIND the camera, which is the sign error this comment exists to prevent.
-        rays[:, 2] = -1.0
-        rect_pts = (K_rect_inv @ rays.T).T * dist[:, None]
-        a_pts = (info["R_a_to_rect"].T @ rect_pts.T).T
-        T_world_a = np.asarray(cal_l.T_world_cam, dtype=np.float64)
-        world = (T_world_a[:3, :3] @ a_pts.T).T + T_world_a[:3, 3]
 
         bbox_min, bbox_max = geo.percentile_bbox3d(world)
         centroid = [
@@ -329,9 +608,7 @@ class Stereo3DTool(BaseTool):
         top_z = float(geo.top_z_from_points(world))
         yaw = float(geo.yaw_from_points(world[:, :2]))
 
-        # A matched pixel's depth error is sigma_d * Z^2 / (f B). sigma_d is an assumption for
-        # SGBM without a calibration set; it is stated and used consistently rather than dressed
-        # up as a measured quantity.
+        # sigma_d is assumed disparity noise, not measured model accuracy.
         sigma_d = float(context.get("stereo_sigma_d_px", 1.0))
         sigma_z = dist * dist / (focal * baseline) * sigma_d
         height_unc = float(np.median(sigma_z))
@@ -345,24 +622,36 @@ class Stereo3DTool(BaseTool):
             yaw_rad=yaw,
             uncertainty_m=height_unc,
             views_used=2,
-            lateral_uncertainty_m=float(np.median(sigma_z) * 0.5),
-            height_uncertainty_m=height_unc,
+            lateral_uncertainty_m=None,
+            height_uncertainty_m=None,
             view_disagreement_m=None,
-            method="stereo_sgbm",
+            method=f"stereo_{backend}",
         )
 
         extras: dict[str, Any] = {
             "method": "stereo",
-            "backend": "sgbm",
+            "backend": backend,
+            "masked": mask is not None,
+            "geometry_scope": "matched_visible_surface",
+            "geometry_summary": "percentile_bbox_midpoint; bounds/top/yaw describe samples, not object shape",
+            "uncertainty_model": "median Z^2*sigma_d/(f*B), assumed rectified-depth noise, not calibrated world-axis error",
+            "uncertainty_excludes": [
+                "calibration_error",
+                "occlusion",
+                "mismatches",
+                "unseen_surfaces",
+            ],
+            "rectified": True,
+            "left_support_fraction": float(info["support_a"].mean()),
+            "right_support_fraction": float(info["support_b"].mean()),
             "left": left_name,
             "right": right_name,
             "focal_rect_px": float(focal),
             "baseline_m": float(baseline),
-            "num_disparities": num_disparities,
-            "block_size": block_size,
+            **backend_details,
             "sigma_d_px": sigma_d,
             "valid_fraction": valid_fraction,
-            "points": int(rows.size),
+            "points": int(dist.size),
             "median_depth_m": float(np.median(dist)),
             "median_sigma_z_m": float(np.median(sigma_z)),
             "disparity_p02": float(np.percentile(disparity[valid], 2)),
@@ -372,7 +661,7 @@ class Stereo3DTool(BaseTool):
 
         self._log(
             ctx,
-            f"stereo_3d {left_name}->{right_name}: {rows.size} pts, {valid_fraction * 100:.1f}% valid, depth {float(np.median(dist)):.3f} m, "
+            f"stereo_3d {left_name}->{right_name}: {dist.size} pts, {valid_fraction * 100:.1f}% valid, depth {float(np.median(dist)):.3f} m, "
             f"sigma_z {float(np.median(sigma_z)) * 1000.0:.1f} mm, {(time.perf_counter() - started) * 1000.0:.1f} ms",
             level="debug",
         )
@@ -383,6 +672,8 @@ class Stereo3DTool(BaseTool):
             camera=left_name,
             images={left_name: image_l, right_name: image_r},
             calibration_id=getattr(cal_l, "id", None),
+            model={"foundation_stereo": "FoundationStereo", "ffs": "Fast-FoundationStereo"}.get(backend),
+            model_sha256=self._model_sha256 if backend in {"foundation_stereo", "ffs"} else None,
         )
         return [
             make_percept(

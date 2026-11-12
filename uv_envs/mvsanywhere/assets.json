@@ -1,0 +1,67 @@
+{
+  "model": "MVSAnywhere HERO",
+  "license": "Niantic non-commercial research; see pinned upstream LICENSE",
+  "source": {
+    "url": "https://github.com/nianticlabs/mvsanywhere.git",
+    "revision": "5bd49bba0992aa56060e1aa3bb40b2150b04726f",
+    "offline_patches": [
+      {
+        "path": "src/mvsanywhere/modules/vit_modules.py",
+        "original_sha256": "ee16f607e82f447ff86e49d7c041516dff419e3223189fcff664be7ca4d1044d",
+        "sha256": "0fa5ec88d94fb39a87ca1ab9c4c5894472f8a78f4beaa19fb649d4e1f37edb67",
+        "replacements": [
+          {
+            "original": "from loguru import logger",
+            "replacement": "from pathlib import Path\n\nfrom loguru import logger",
+            "count": 1
+          },
+          {
+            "original": "torch.hub.load('facebookresearch/dinov2', model_name)",
+            "replacement": "torch.hub.load(str(Path(__file__).resolve().parents[3] / 'dinov2'), model_name, source='local', pretrained=False)",
+            "count": 2
+          }
+        ]
+      },
+      {
+        "path": "src/mvsanywhere/modules/networks.py",
+        "original_sha256": "f6bac0344ff30d68475732ddc64b8d657a43bad9c59787ea572f89d36f306035",
+        "sha256": "9085f5f84d674aceee61150cd5df3afc22ef9938e4bdde4090753b7660c500eb",
+        "replacements": [
+          {
+            "original": "encoder = resnets[num_layers](pretrained)",
+            "replacement": "encoder = resnets[num_layers](pretrained=False)  # Full HERO checkpoint supplies every matching weight.",
+            "count": 1
+          }
+        ]
+      }
+    ]
+  },
+  "dinov2": {
+    "url": "https://github.com/facebookresearch/dinov2.git",
+    "revision": "7764ea0f912e53c92e82eb78a2a1631e92725fc8",
+    "pretrained": false
+  },
+  "checkpoint": {
+    "url": "https://storage.googleapis.com/niantic-lon-static/research/mvsanywhere/mvsanywhere_hero.ckpt",
+    "filename": "mvsanywhere_hero.ckpt",
+    "sha256": "00878bab903b1d384cd6bb9ea092e247a9036d429cb8bcc3d6dcbb81f67e556d"
+  },
+  "demo_assets": [
+    {
+      "path": "demo_assets/cameras.npy",
+      "sha256": "30b1d127bf8b39270073bcd4b5bb15c9572a56e57fb0e89a7020ce7e3773f65d"
+    },
+    {
+      "path": "demo_assets/cur_image.png",
+      "sha256": "0d19fce1f177673517e116c4fbafd66db9bb169c8302a4988b01c13cc08b813a"
+    },
+    {
+      "path": "demo_assets/src_image_1.png",
+      "sha256": "74a86dc36a5dc53bf6cf0195b49da47cd835dc60ff2b7d4e24e16732a4587e47"
+    },
+    {
+      "path": "demo_assets/src_image_2.png",
+      "sha256": "2be4b9d8cd57181ce367689b329cb2bc362c1cd073c3507148f919e0944471f8"
+    }
+  ]
+}

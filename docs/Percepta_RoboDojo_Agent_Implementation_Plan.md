@@ -775,6 +775,13 @@ bash scripts/robodojo.sh summarize
 
 ## 12. 分阶段实施任务单
 
+> **模型部署进度（2026-11-11）**：D2 Fast-FoundationStereo 23-36-37、D3 FoundationStereo
+> 23-51-11、D5 MVSAnywhere HERO、D6 DA3-BASE 已有独立锁定 uv 环境、官方权重校验、
+> worker、工具配置和真实 GPU/HTTP 验证。部署命令和证据见
+> [模型隔离文档 §12](model-isolation.md#12-其余三个神经模型的部署2026-11-11)。
+> FFS 该 checkpoint 的实测视差限制为 416，640 会失败；DA3 以已知位姿基线恢复米制尺度。
+> 下列 M0–M5 包含部署之外的目标 mask 接线、融合和 Policy 实验，尚不能整体勾选完成。
+
 > **【编者补充 v1.2 — A4：建议在 M0 之前插入 §12.0 的“可行性前置测量”】**
 >
 > 原文从 M0 直接进入代码审计，但**整个双目方案依赖两个尚未验证的物理前提**。
