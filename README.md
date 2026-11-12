@@ -195,6 +195,8 @@ An explicitly selected geometry tool that fails to load remains a failed geometr
 the pipeline does not substitute mask fusion. Cached observations are copied at both cache
 boundaries, so editing an SDK response does not alter later requests.
 If inference fails for uncached prompts, cached results remain in the response in input order.
+A prompt's complete camera group is kept out of the cache if any result is `unavailable`
+or `timeout`, so a retry can observe model recovery; `ok` and `not_found` remain cacheable (D47).
 Replacing a local runner transfers an explicitly reused cache to its replacement; the cache
 is closed when its final runner closes.
 

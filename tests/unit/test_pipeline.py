@@ -809,6 +809,66 @@ def test_failed_cache_misses_preserve_cached_and_repeated_prompt_results(
         runner.close()
 
 
+@pytest.mark.parametrize("failure_status", ["unavailable", "timeout"])
+@pytest.mark.parametrize("failed_camera", [None, "cam_left"], ids=["all_cameras", "one_camera"])
+@pytest.mark.parametrize("cached_status", ["ok", "not_found"])
+def test_returned_transient_failures_skip_the_whole_cache_group_and_recover(
+    monkeypatch: pytest.MonkeyPatch, failure_status: str, failed_camera: str | None, cached_status: str,
+) -> None:
+    tool, cache = RecordingTool(), DictCache()
+    runner = make_runner(config_for([tool.name]), tool, cache=cache)
+    other = Prompt(type="text", text="blue block")
+    images = {CAM: synth.red_square_scene(), "cam_left": synth.red_square_scene()}
+    prompts = [TEXT, other, other, TEXT]
+    request = request_for(prompts, images=images, tools=[tool.name])
+    original_perceive = tool.perceive
+
+    def fail(_ctx, received):
+        returned = original_perceive(_ctx, received)
+        for percept in returned:
+            if percept.provenance.prompt == TEXT:
+                percept.status = cached_status
+                if cached_status == "not_found":
+                    percept.observations = []
+            elif failed_camera is None or percept.camera == failed_camera:
+                percept.status = failure_status
+                percept.observations = []
+        return returned
+
+    order = [(prompt.text, camera) for prompt in prompts for camera in sorted(images)]
+    try:
+        monkeypatch.setattr(tool, "perceive", fail)
+        first = runner.perceive(request)
+        assert [(p.provenance.prompt.text, p.camera) for p in first.percepts] == order
+        assert [p.status for p in first.percepts] == [
+            cached_status if prompt == TEXT else failure_status if failed_camera in {None, camera} else "ok"
+            for prompt in prompts for camera in sorted(images)
+        ]
+        assert all(not p.provenance.cache_hit for p in first.percepts)
+        assert len(cache.keys) == 1, "a transient failure must keep the whole prompt/camera group out of the cache"
+        assert len(next(iter(cache.store.values()))) == len(images)
+
+        monkeypatch.setattr(tool, "perceive", original_perceive)
+        recovered = runner.perceive(request)
+        assert [(p.provenance.prompt.text, p.camera) for p in recovered.percepts] == order
+        assert [p.status for p in recovered.percepts] == [
+            cached_status if prompt == TEXT else "ok" for prompt in prompts for _camera in sorted(images)
+        ]
+        assert [p.provenance.cache_hit for p in recovered.percepts] == [
+            prompt == TEXT for prompt in prompts for _camera in sorted(images)
+        ]
+        assert tool.calls == [[TEXT, other], [other]]
+        assert len(cache.keys) == 2
+
+        repeated = runner.perceive(request)
+        assert [(p.provenance.prompt.text, p.camera) for p in repeated.percepts] == order
+        assert [p.status for p in repeated.percepts] == [p.status for p in recovered.percepts]
+        assert all(p.provenance.cache_hit for p in repeated.percepts)
+        assert len(tool.calls) == 2
+    finally:
+        runner.close()
+
+
 def test_broken_cache_degrades_to_no_cache() -> None:
     class ExplodingCache(DictCache):
         def get(self, key: str) -> Any:

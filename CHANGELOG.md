@@ -8,6 +8,13 @@ changed. Every design decision referenced as `D<n>` lives in [`docs/decisions.md
 
 ## Unreleased
 
+### Cache recovery fix — 2026-11-12
+
+* Skip caching the complete prompt/camera result group when any returned Percept is
+  unavailable or timeout, so retries reach a recovered model; keep ok/not_found caching (D47).
+* Cover default-cache HTTP model recovery, partial-camera failures, repeated prompts and
+  healthy cache hits; preserve the dated prior behavior and regression evidence.
+
 ### Confirmed network error fixes — 2026-11-12
 
 * Wrap SDK disconnects, resets and truncated responses in `PerceptaError`; reject short

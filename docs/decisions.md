@@ -862,3 +862,24 @@ of leaking these transport exceptions as an outer HTTP 500.
 This applies to the optional HTTP model backend; deployed neural subprocess runtimes,
 weights, schemas, protocol bytes and dependencies do not change. Before/after source and
 CPU regression evidence are preserved in [the modification log](documentation-changes.md).
+
+## D47 — Keep returned transient failures out of prompt/camera cache groups
+
+*Date:* 2026-11-12. *Before-fix baseline:* `4ab7597`. A supported SAM3 HTTP backend can
+recover after a complete 503 or a transient timeout, but its segment failure is returned as
+an unavailable Percept. The pipeline previously cached that return value for the default
+300-second TTL, blocking recovery for the same image/prompt. D44 already excluded thrown
+tool failures; it did not cover failures returned as Percepts.
+
+At the shared cache write condition, reject a whole prompt/camera group if any Percept has
+status unavailable or timeout. Do not cache only the successful cameras from a partial
+group, because a later hit would omit the failed cameras instead of retrying them.
+Other prompts in the request can still be cached. The response and upstream results are
+unchanged, including repeated-prompt ordering and counts; ok and not_found remain cacheable.
+No cache key, schema, public API, dependency or model lifecycle policy changes.
+
+The demonstrated recovery failure requires the optional HTTP model backend with caching
+enabled. Current neural subprocess deployments retain their terminal failure and no-restart
+policy; this change does not make a failed worker recover automatically. Standard-config
+HTTP/protocol recovery and mixed-camera regressions, old source and post-fix review are
+recorded in [the modification log](documentation-changes.md).

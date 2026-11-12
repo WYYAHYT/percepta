@@ -541,7 +541,7 @@ class PipelineRunner:
                 if cache is not None:
                     for prompt in unique_prompts:
                         group = [p for p in produced if p.provenance.prompt == prompt]
-                        if group:
+                        if group and not any(p.status in {"unavailable", "timeout"} for p in group):
                             self._cache_put(cache, image_hashes, prompt, name, ctx.options, group)
 
         if not misses:

@@ -1,8 +1,8 @@
 # 文档修订记录
 
-> **当前状态（2026-11-12 16:33，D46网络异常修复）**：仅修复复核确认的A05与A07，新增34项回归；
-> 最终CPU测试1018 passed、9 skipped，Ruff与真实HTTP e2e通过。旧代码、修改原因、先红后绿
-> 与可选后端作用范围见页末；此前各批次记录保留，不将其余审计候选视为已确认严重缺陷。
+> **当前状态（2026-11-12，D47临时失败缓存修复）**：含unavailable／timeout的提示相机组不再写缓存，
+> 新增12项回归，最终CPU测试1030 passed、9 skipped，Ruff与真实HTTP e2e通过。修复后再扫描
+> 未确认新的严重问题；旧行为、先红后绿、复查范围与限制见页末，此前各批次原文保留。
 
 ## 2026-11-12：对齐已部署实现，保留历史原文
 
@@ -504,3 +504,79 @@ HTTP模型修改位于共享`_post`，覆盖`set_image`与`segment`；SAM3沿用
 不改变现有HTTP后端超时可恢复、连接／协议故障终止的策略，也不增加自动模型重启。
 未运行GPU forward、任务精度、长期压力或跨机部署；原有`.qoder/`不纳入提交。
 修复仅保存为本地Git提交，未推送／发布。
+
+## 2026-11-12：修复临时失败缓存并再次扫描（D47）
+
+- **修改日期**：2026-11-12，Asia/Shanghai（UTC+08:00）；精确提交时间由本地Git记录保留。
+- **修改前基线**：`4ab7597`，`fix: normalize SDK and HTTP model transport failures`。
+- **用户授权**：“OK，修复这个问题，然后再扫描”；对应上一轮已复现的HTTP模型临时失败被缓存问题。
+- **版本**：规格修订号v0.3.0-doc.7；包0.3.0、schema percepta/v1、线协议、模型资产、配置与依赖不变。
+- **状态**：已修复共享缓存写入条件，在源码冻结后完成回归、全量验收与再次只读扫描；未确认新的严重问题。
+
+本页顶部修改前原文：
+
+> **当前状态（2026-11-12 16:33，D46网络异常修复）**：仅修复复核确认的A05与A07，新增34项回归；
+> 最终CPU测试1018 passed、9 skipped，Ruff与真实HTTP e2e通过。旧代码、修改原因、先红后绿
+> 与可选后端作用范围见页末；此前各批次记录保留，不将其余审计候选视为已确认严重缺陷。
+
+### 原问题、原代码与修复
+
+上一轮使用标准Sam3Tool配置HTTP模型后端、默认缓存和合法RGB／text请求复现：
+第一次`/segment`完整503被转成unavailable Percept并写入缓存；远端恢复后，相同图像／提示
+仍命中该失败结果，不再请求模型，默认可持续至写入后300秒TTL到期。设置cache=False立即成功。
+同样故障若在`/set_image`则抛ToolUnavailable，进入D44已有的不缓存异常分支，下一请求可正常恢复。
+
+`PipelineRunner._call_tool()`原写入条件为：
+
+```python
+group = [p for p in produced if p.provenance.prompt == prompt]
+if group:
+    self._cache_put(cache, image_hashes, prompt, name, ctx.options, group)
+```
+
+本次只改其中一处条件：
+
+```python
+if group and not any(p.status in {"unavailable", "timeout"} for p in group):
+    self._cache_put(cache, image_hashes, prompt, name, ctx.options, group)
+```
+
+按整个prompt／camera组拒绝写入，保证下次重推该提示的所有相机；若只删除失败相机再缓存残组，
+缓存有效期内的后续命中会漏掉该相机。其他提示的正常组仍可缓存，ok／not_found缓存、返回结果、
+重复提示顺序／次数、下游几何数据及既有子进程终止策略不变；没有新增重试或自动重启逻辑。
+
+完整旧源码、旧文档与差异可复查：
+
+```bash
+git show 4ab7597:src/percepta/pipeline.py
+git show 4ab7597:docs/documentation-changes.md
+git diff 4ab7597 -- src/percepta/pipeline.py tests/unit/test_pipeline.py tests/contract/test_cache_recovery.py README.md CHANGELOG.md percepta-SPEC.md docs
+```
+
+### 先红后绿及最终验收
+
+- `tests/unit/test_pipeline.py`新增8项：unavailable／timeout × 全部／单个相机失败 × 其他提示ok／not_found。旧实现 **8 failed → 新增8项全过**；整个pipeline文件51 passed。验证失败整组不缓存、正常组缓存、重复提示顺序／次数、恢复后只重推缺失提示且两相机齐全、随后全命中。
+- `tests/contract/test_cache_recovery.py`新增4项：标准Sam3Tool与真实HttpBackend、默认cache，prepare／segment × HTTP503／协议unavailable帧。只读加载基线旧`_call_tool`：**2 failed（segment）、2兼容通过（prepare）→ 4 passed**。验证原请求unavailable、下一请求重新访问模型并ok、第三次健康缓存命中；未注入backend_factory。
+- 合计新增12项，旧实现10项失败、2项兼容通过；修复后相关组 **55 passed**，1.55s。组间有重叠，不将定向数量与完整suite相加。
+- 源码／测试冻结后 `uv run --locked pytest -o addopts= -q`：**1030 passed、9 skipped**，69.20s；较基线1018增加12。有1条既有Starlette/httpx弃用warning。
+- `uv run --locked ruff check .`：通过；`uv run --locked python scripts/e2e_smoke.py`：**E2E OK**，真实uvicorn HTTP与本地输出一致，not_found仍HTTP200。
+- `uv run --locked python scripts/check_lock_portability.py`：6份锁均使用官方域名；无新增依赖、锁变更或权重下载。
+- README缓存说明、规格§11.4／修订历史及D47同步更新；根规格与docs镜像保持相同，旧批次记录保留。
+- 两份规格逐字一致；本批6份文档的12个唯一Markdown本地链接目标均存在，`git diff --check`通过；独立核对实现与文档通过。
+
+### 修复后的再次扫描
+
+对冻结后的代码再次只读复核：服务准入／超时／取消／关闭、SDK readiness、pipeline与缓存、
+多相机／重复提示／混合命中，SAM3三种后端及五套模型的进程、协议、故障和清理；同时重新核对
+双目校正与视差／深度转世界坐标、三目汇总、fusion深度／柱体／单视角及当前部署配置。
+未确认新的严重bug，未把此前已降级的非法输入、插件扩展边界或算法假设重新计作严重问题。
+
+- 独立核对确认补丁只限制写缓存，不会删除当次返回／传给下游的相机结果。
+- 真实PerceptCache的小规模并发检查：8线程24个合法请求，仅首次原请求包含一次单相机临时失败；其余23个健康，每次8项结果和顺序完整，随后健康缓存命中。并发冷miss可重复推理，未声称新增请求合并能力或压力性能保证。
+- 真实HttpBackend额外检查双相机×双提示：首次单结果unavailable；下一请求失败提示两相机重推、正常提示命中，结果全ok；第三次全命中，不再请求模型。未改仓库来运行该检查。
+
+这些恢复／并发检查使用CPU mock、真实loopback模型HTTP和ASGI外层，不是真实模型GPU forward。
+已证明的恢复缺陷原本限于可选HTTP模型后端＋缓存；当前五套子进程故障本就终止、不自动重启，
+四套神经几何配置还关闭缓存，不能泛称它们原本都存在同样的恢复损害。
+本轮未运行GPU、任务精度、长期压力或跨机部署；没有扩展RoboDojo接入。
+原有`.qoder/`保持未跟踪；修复仅保存在本地Git，未推送／发布。
