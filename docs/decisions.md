@@ -837,3 +837,28 @@ increases spacing until rounded grid dimensions, including endpoint centres, fit
 The grid continues to cover the requested world bounds and retains MIN_CELL_M=0.0005.
 Each axis has at least two centres, so the budget must be an integer of at least four;
 invalid budgets or nonfinite/reversed bounds raise ValueError before grid allocation.
+
+## D46 — Normalize confirmed SDK and HTTP model error-body transport failures
+
+*Date:* 2026-11-12. *Before-fix baseline:* `f974e98`. Scope is limited to confirmed
+follow-up findings A05 and A07; other challenged audit items are not implemented here.
+
+SDK connection and response-body HTTPException/OSError failures become
+`PerceptaError(code="connection_error")`, including failures reading an HTTPError body.
+URLError retains its reason. Deadline reads reject EOF with outstanding Content-Length bytes,
+so a truncated response containing a valid JSON prefix cannot establish readiness.
+Existing request retries, readiness deadlines, chunked/close-delimited responses and simple
+file-like test doubles retain their behavior. No new retry policy is introduced.
+
+HttpBackend reads at most 400 diagnostic bytes from HTTPError and closes the response on
+success or failure. A short read with outstanding Content-Length is an IncompleteRead and
+follows the existing terminal connection/protocol policy. A diagnostic-read TimeoutError
+maps to reusable BackendUnavailable, matching the existing transport-timeout policy.
+Complete 4xx remain reusable BackendRequestError; complete 5xx remain reusable
+BackendUnavailable. Once the diagnostic limit is reached, the remaining body is deliberately
+not read or validated. SAM3 prepare and segment paths therefore report unavailable instead
+of leaking these transport exceptions as an outer HTTP 500.
+
+This applies to the optional HTTP model backend; deployed neural subprocess runtimes,
+weights, schemas, protocol bytes and dependencies do not change. Before/after source and
+CPU regression evidence are preserved in [the modification log](documentation-changes.md).

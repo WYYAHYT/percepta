@@ -277,7 +277,12 @@ def _read_response_body(response: Any, deadline: float | None, idle_timeout: flo
         if time.monotonic() >= deadline:
             raise TimeoutError("request deadline exceeded")
         if not chunk:
-            return b"".join(chunks)
+            payload = b"".join(chunks)
+            remaining_length = getattr(stream, "length", None)
+            if remaining_length:
+                # HTTPResponse.read1() leaves the missing Content-Length bytes on early EOF.
+                raise http.client.IncompleteRead(payload, remaining_length)
+            return payload
         chunks.append(chunk)
 
 
@@ -330,8 +335,8 @@ class PerceptaClient:
             try:
                 with exc:
                     payload = _read_response_body(exc, deadline, timeout)
-            except TimeoutError as timeout_error:
-                raise PerceptaError(f"cannot reach {url}: {timeout_error}", url=url, code="connection_error") from None
+            except (http.client.HTTPException, OSError) as transport_error:
+                raise PerceptaError(f"cannot reach {url}: {transport_error}", url=url, code="connection_error") from None
             parsed, code = _parse_error(payload)
             raise PerceptaError(
                 parsed or f"request failed with HTTP {exc.code}",
@@ -340,7 +345,7 @@ class PerceptaClient:
                 body=payload and _maybe_json(payload),
                 url=url,
             ) from None
-        except (urllib.error.URLError, TimeoutError) as exc:
+        except (http.client.HTTPException, OSError) as exc:
             reason = exc.reason if isinstance(exc, urllib.error.URLError) else str(exc)
             raise PerceptaError(
                 f"cannot reach {url}: {reason}", url=url, code="connection_error"

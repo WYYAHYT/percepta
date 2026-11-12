@@ -88,6 +88,9 @@ resp = client.perceive(images={"cam_head": photo}, prompts=[Prompt(type="text", 
 `wait_until_ready` returns ``True`` once warm-up has *settled*, including when it failed —
 the service is up either way, and a broken model is reported separately in
 `/healthz.tools[].status`. Pass ``warm=False`` to wait only for the port.
+Disconnects, connection resets and truncated HTTP responses raise
+`PerceptaError(code="connection_error")`. `wait_until_ready()` keeps polling within its
+deadline; a short Content-Length response cannot establish readiness even if its prefix is valid JSON (D46).
 The stereo/triview deployment configs disable this single-image warm-up. Use their paired or
 three-image smoke commands below to exercise inference; a listening port alone does not prove it ran.
 

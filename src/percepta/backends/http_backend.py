@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 import urllib.error
 import urllib.request
-from http.client import HTTPException
+from http.client import HTTPException, IncompleteRead
 from typing import Any
 
 import numpy as np
@@ -77,7 +77,17 @@ class HttpBackend:
             with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
                 return response.read()
         except urllib.error.HTTPError as exc:
-            body = exc.read()[:400].decode("utf-8", "replace")
+            try:
+                with exc:
+                    raw = exc.read(400)
+                    remaining_length = getattr(exc.fp, "length", None)
+                    if len(raw) < 400 and remaining_length:
+                        raise IncompleteRead(raw, remaining_length)
+            except TimeoutError as err:
+                raise BackendUnavailable(f"model service timed out after {self.timeout_s}s") from err
+            except (HTTPException, OSError) as err:
+                raise self._fail(f"model service connection failed: {err}") from err
+            body = raw.decode("utf-8", "replace")
             if 400 <= exc.code < 500:
                 raise BackendRequestError(f"{url} rejected the request ({exc.code}): {body}") from exc
             raise BackendUnavailable(f"{url} failed ({exc.code}): {body}") from exc

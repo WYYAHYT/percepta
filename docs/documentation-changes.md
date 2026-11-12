@@ -1,8 +1,8 @@
 # 文档修订记录
 
-> **当前状态（2026-11-12 15:13，D45辅助API修复）**：此前登记的3项辅助边界已修复，新增54项回归；
-> 最终CPU测试984 passed、9 skipped，Ruff与真实HTTP e2e通过。R1–R5的修复记录及各批次原文保留，
-> 本次旧代码／新代码、红绿证据及资源边界见页末；不将绿测等同于所有输入与负载均已证明。
+> **当前状态（2026-11-12 16:33，D46网络异常修复）**：仅修复复核确认的A05与A07，新增34项回归；
+> 最终CPU测试1018 passed、9 skipped，Ruff与真实HTTP e2e通过。旧代码、修改原因、先红后绿
+> 与可选后端作用范围见页末；此前各批次记录保留，不将其余审计候选视为已确认严重缺陷。
 
 ## 2026-11-12：对齐已部署实现，保留历史原文
 
@@ -442,3 +442,65 @@ git diff d06241e -- src/percepta tests README.md percepta-SPEC.md docs CHANGELOG
 此次修复没有运行GPU forward、任务精度、长期压力或跨机部署；不修改模型资产或R1–R5的行为。
 本轮列出的3项已按上述回归修复；不据此声称未知输入或全部负载都不存在缺陷。
 原有 `.qoder/` 配置仍不纳入提交；修复保存在本地，未推送／发布。
+
+## 2026-11-12：仅修复复核确认的两项网络错误（D46）
+
+- **修改日期**：2026-11-12，Asia/Shanghai（UTC+08:00）；记录整理时间16:33。
+- **修改前基线**：`f974e98`，`fix: bound fusion decoding and plane grid allocation`。
+- **用户授权**：“OK，那就修复真正需要修复的问题”。范围仅为上一轮复核后确认的A05、A07；编号沿用审计定位，不表示其余候选均为已确认缺陷。
+- **版本**：规格修订号v0.3.0-doc.6；包0.3.0、schema percepta/v1、线协议、模型资产及依赖不变。
+- **状态**：两项均已用故障HTTP响应复现并修复；没有扩展RoboDojo接入、任务精度或模型功能。
+
+本页顶部修改前原文：
+
+> **当前状态（2026-11-12 15:13，D45辅助API修复）**：此前登记的3项辅助边界已修复，新增54项回归；
+> 最终CPU测试984 passed、9 skipped，Ruff与真实HTTP e2e通过。R1–R5的修复记录及各批次原文保留，
+> 本次旧代码／新代码、红绿证据及资源边界见页末；不将绿测等同于所有输入与负载均已证明。
+
+完整旧源码和旧文档由Git基线保留，不以摘要替代原文件：
+
+```bash
+git show f974e98:src/percepta/client.py
+git show f974e98:src/percepta/backends/http_backend.py
+git show f974e98:percepta-SPEC.md
+git diff f974e98 -- src/percepta/client.py src/percepta/backends/http_backend.py tests/unit/test_client_network_errors.py tests/unit/test_http_backend_network_errors.py README.md CHANGELOG.md percepta-SPEC.md docs
+```
+
+### 修改前后与影响
+
+| 编号 | 原代码／已确认后果 | 修改后及原因 | 兼容边界 |
+|---|---|---|---|
+| A05 · SDK异常及readiness | `_raw_request`外层只捕获`(URLError, TimeoutError)`，HTTPError正文读取只捕获TimeoutError；RemoteDisconnected、IncompleteRead、ConnectionResetError可直接外泄。deadline读取`if not chunk: return b"".join(chunks)`不检查剩余长度，截断正文恰好为`{"ok":true}`会误报就绪 | 两处统一捕获`(http.client.HTTPException, OSError)`并封装为`PerceptaError(code="connection_error")`；URLError仍保留reason。deadline读取到EOF时检查HTTPResponse.length，未读足则抛IncompleteRead并按相同契约处理 | readiness继续按原期限轮询；不新增重试策略，完整Content-Length／chunked／连接关闭定界响应及简单mock仍可用 |
+| A07 · 可选HTTP模型后端 | `except HTTPError`内直接`exc.read()[:400].decode(...)`；读取时超时或截断不会被同级except捕获。合法感知请求经SAM3准备图像或分割时会泄漏原生异常，外层返回HTTP500；切片也未限制实际读取量 | `with exc`中只读400字节并关闭；少于上限且仍有声明长度时抛IncompleteRead。内层先将TimeoutError映射为BackendUnavailable，再将HTTPException／其他OSError送入既有`_fail`策略 | 完整4xx仍BackendRequestError，完整5xx仍BackendUnavailable，均可复用；正文读取超时也可复用。截断／连接故障仍按原终止策略标记health_error，后续不再发请求；工具返回unavailable，不能冒充not_found |
+
+SDK修改位于共享传输入口，health／info／tools／perceive及readiness共用，无需逐个调用点复制补丁。
+HTTP模型修改位于共享`_post`，覆盖`set_image`与`segment`；SAM3沿用现有不可用映射，未改工具／服务接口。
+当前五套神经模型部署配置使用独立子进程；A07只在选用HTTP模型后端时生效，不宣称当前所有部署原本都会遇到该问题。
+
+### 先红后绿证据
+
+- A05新增14项：旧实现 **10 failed、4兼容通过 → 14 passed**；连同既有SDK／生命周期组65 passed。
+  故障socket覆盖响应状态前断连、成功／错误响应截断及“截断但JSON前缀完整”；连接重置用确定性transport替身覆盖连接、成功正文和错误正文3条路径。
+- A07后端新增16项：旧实现 **12 failed、4兼容通过 → 16 passed**。
+  用本机真实HTTP服务组合prepare／segment、400／503、完整／截断／慢正文／达到400字节上限的诊断；断言异常分类、health_error和后续恢复／终止。
+- A07服务层再增4项：prepare／segment各覆盖截断和慢正文。将只读加载的`f974e98`旧`_post`绑定到测试进程，**4项均HTTP500而失败**；修复后全部HTTP200、Percept.status=unavailable、observations为空。
+  此对照未checkout或覆盖工作区源码；外层使用ASGI TestClient，模型侧为真实loopback HTTP。
+- 合计新增34项；其中旧实现26项失败、8项用于兼容验证，修复后全部通过。新增文件为`tests/unit/test_client_network_errors.py`和`tests/unit/test_http_backend_network_errors.py`。
+- 独立只读交叉检查两项补丁及SAM3调用链通过；未据此重新扩大审计范围。
+
+这些是CPU故障传输与协议测试，模型服务为mock，不是SAM3真实模型推理或精度测量。
+
+### 最终验收与文档同步
+
+源码冻结后执行：
+
+- `uv run --locked pytest -o addopts= -q`：**1018 passed、9 skipped**，69.81s；较基线984增加34。有1条既有Starlette/httpx弃用warning。
+- `uv run --locked ruff check .`：通过；`uv run --locked python scripts/e2e_smoke.py`：**E2E OK**，真实uvicorn的HTTP／进程内输出一致，not_found仍HTTP200。
+- `uv run --locked python scripts/check_lock_portability.py`：6份锁均使用官方域名；无新增依赖、锁变更、权重下载。
+- README新增SDK网络错误／readiness行为；规格主本从v0.3.0-doc.5修订为doc.6，补§7和§11.2及历史行；镜像逐字同步。D46和CHANGELOG追加本次范围与恢复语义，旧批次内容保留。
+- 两份规格逐字一致；本批6份文档中的12个唯一Markdown本地链接目标均存在，`git diff --check`通过。
+
+错误诊断达到400字节后即停止读取，不校验其后的正文；此上限只约束诊断读取，不是新增整个请求的绝对期限。
+不改变现有HTTP后端超时可恢复、连接／协议故障终止的策略，也不增加自动模型重启。
+未运行GPU forward、任务精度、长期压力或跨机部署；原有`.qoder/`不纳入提交。
+修复仅保存为本地Git提交，未推送／发布。

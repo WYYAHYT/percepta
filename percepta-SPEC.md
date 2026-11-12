@@ -1,4 +1,4 @@
-# percepta — 功能规格与开发说明书（v0.3.0-doc.5，2026-11-12）
+# percepta — 功能规格与开发说明书（v0.3.0-doc.6，2026-11-12）
 
 > 本文档是给**实现者（人或 Agent）**看的规格书，不是用户手册。目标是把"一套可插拔的机器人感知层"定义到**接口无歧义、验收可自动判定**的程度。实现时不要自行发明字段、端点或语义；确需变更，先改本文档并升版本。
 
@@ -22,6 +22,10 @@
 >
 > **辅助 API 边界（同日，D45，基线 `d06241e`）**：补齐融合mask解码前尺寸约束、
 > PlaneGrid整数索引及严格网格预算；输入／输出坐标、schema与模型资产不变。
+>
+> **已确认的网络错误修复（同日，D46，基线 `f974e98`）**：仅修复复核确认的SDK
+> 网络异常封装／readiness截断判断，以及可选HTTP模型后端的错误响应体读取；
+> 前后代码、先红后绿及作用范围见 `docs/documentation-changes.md`。
 
 ---
 
@@ -360,6 +364,7 @@ class PerceptaClient:
 
 - `images` 值可为 numpy RGB 或本地路径；客户端负责 PNG 编码与 base64。
 - 客户端对 503/5xx 做有界重试（默认 2 次，指数退避）；`not_found` 不重试。
+- 断连、连接重置、响应截断统一抛 `PerceptaError(code="connection_error")`；readiness按原期限继续轮询。Content-Length未读足时，即使已有完整JSON也不算就绪（D46）。
 - 客户端提供 `perceive_local()`：同进程调用共享 `PipelineRunner`，不经过 HTTP；工具自身仍可使用独立模型子进程。
 - `wait_until_ready(timeout_s=120.0, interval_s=0.25, *, warm=True)` 等待服务可访问和 warmup 结束；预热失败也算结束，须另查 `tools[].status` 与 `warmup_state()`。双目/三目配置关闭通用单图预热，需使用对应 smoke 核实真实推理就绪。
 
@@ -485,6 +490,7 @@ warmup:
 - 首次加载在同一 per-tool 锁内执行；失败构造/加载实例会尽力关闭，不发布半成品。HTTP504/取消不释放仍在计算的任务占用，任务实际结束才释放准入位和 inflight；shutdown 先停止准入并等待任务及预热，再关闭工具。
 - 通用 SAM3 子进程的 `timeout_s` 分别约束启动握手及每次完整写入/读取 RPC；首次请求可能经历两段预算。超时、EOF、坏协议帧是终止故障并回收 worker，不静默重启或伪装为 not_found。
 - 请求级 BackendRequestError（含 Sam3BackendError）不会终止健康 worker；共享期限 IO 与 stderr 等待使用 poll，支持高编号文件描述符（D44）。
+- 可选HTTP模型后端最多读取400字节错误诊断；读取超时映射为可恢复的BackendUnavailable，读取中连接／协议失败进入原终止故障策略。完整4xx／5xx保持原分类，不因读取错误响应体泄漏原生异常为HTTP500（D46）。
 - 多 GPU：一个进程绑一张卡（`CUDA_VISIBLE_DEVICES`）；多实例多端口。
 - 子进程模型可各自设置 `cuda_visible_devices`；空字符串继承进程环境，不会自动选择空闲显卡。当前没有自动多 worker 调度或崩溃后重启。
 
@@ -658,6 +664,7 @@ percepta/
 | v0.3.0-doc.3 | 2026-11-12 | D40–D43 按 `a761656` 的20组审计问题修复请求状态、加载/超时生命周期、几何边界、缓存/SDK/错误元数据；按用户选择明确 Options 默认与 Prompt 显式优先，保留历史审计与红绿记录 |
 | v0.3.0-doc.4 | 2026-11-12 | D44 按 `9779a96` 复查补修R1–R5：健康worker恢复、高fd、混合缓存失败、融合数值溢出及cache所有权；保留原复查结论，追加修复与验收记录 |
 | v0.3.0-doc.5 | 2026-11-12 | D45 修复3项辅助API边界：融合按标定限制mask解码、PlaneGrid整数索引及极端长宽比预算；增加反例与修改记录，包和schema不升级 |
+| v0.3.0-doc.6 | 2026-11-12 | D46 仅修复复核确认的A05／A07：SDK网络异常与readiness截断、HTTP模型错误响应读取；记录旧行为和回归，保留既有恢复语义及包／schema／协议版本 |
 
 ---
 

@@ -8,6 +8,15 @@ changed. Every design decision referenced as `D<n>` lives in [`docs/decisions.md
 
 ## Unreleased
 
+### Confirmed network error fixes — 2026-11-12
+
+* Wrap SDK disconnects, resets and truncated responses in `PerceptaError`; reject short
+  Content-Length bodies during readiness checks even when their prefix is valid JSON (D46).
+* Bound HTTP model error diagnostics to 400 bytes and map failures while reading them through
+  existing backend error handling, so affected SAM3 requests report unavailable instead of HTTP 500.
+* Preserve complete HTTP error classification and recovery; record the two confirmed findings,
+  previous code and regression evidence in [`docs/documentation-changes.md`](docs/documentation-changes.md).
+
 ### Auxiliary API fixes — 2026-11-12
 
 * Check calibrated mask dimensions before RLE/empty-mask allocation or PNG pixel decoding;
