@@ -191,6 +191,9 @@ can still populate `fused`.
 An explicitly selected geometry tool that fails to load remains a failed geometry stage;
 the pipeline does not substitute mask fusion. Cached observations are copied at both cache
 boundaries, so editing an SDK response does not alter later requests.
+If inference fails for uncached prompts, cached results remain in the response in input order.
+Replacing a local runner transfers an explicitly reused cache to its replacement; the cache
+is closed when its final runner closes.
 
 Adding a tool: subclass `percepta.tools.base.BaseTool`, keep heavy imports inside `load()`,
 register an entry point in the `percepta.tools` group (or `percepta.tools.<name>` module).

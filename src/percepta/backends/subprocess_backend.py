@@ -176,9 +176,10 @@ class SubprocessBackend:
 
         def pump() -> None:
             try:
+                poller = select.poll()
+                poller.register(fd, select.POLLIN)
                 while not self._stderr_stop.is_set():
-                    readable, _, _ = select.select([fd], [], [], 0.05)
-                    if not readable:
+                    if not poller.poll(50):
                         continue
                     try:
                         chunk = os.read(fd, 4096)

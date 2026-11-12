@@ -785,3 +785,30 @@ Resolution happens before SDK JSON serialization so HTTP revalidation sees the s
 values. The caller's Prompt remains unchanged; inference, cache keys and provenance consume
 the resolved Prompt. This preserves existing per-prompt settings while making global defaults
 functional, without new fields or changing `percepta/v1`.
+
+## D44 — Preserve recoverable requests, cached results and resource ownership
+
+*Date:* 2026-11-12. *Before-fix source:* `9779a96`; review recorded in `90d75d6`.
+This repairs R1–R5 from [the follow-up review](reviews/2026-11-12-runtime-fix-review.md).
+The review's original findings and earlier closure claims remain dated history.
+
+The generic worker recognizes BackendRequestError, and Sam3BackendError uses that same
+request-error type. A declared invalid request leaves the worker healthy for the next prompt;
+genuine unavailability, timeout, EOF and malformed protocol remain terminal. Shared deadline
+pipe IO and both stderr drain paths use poll, supporting high file descriptors while retaining
+the startup/complete-RPC budgets, length limits, partial IO and bounded cleanup.
+
+Cached hits and uncached failures are merged in input order. Failure groups are built from
+unique effective prompts before restoring occurrences, so repeated prompts do not multiply
+failures. Exception-derived failures are not cached; copied hits keep cache_hit=True.
+
+Silhouette-fusion numeric conversions treat OverflowError like existing invalid numeric
+input. Invalid table information warns; multiview silhouette fusion retains its warned
+zero-height table assumption, while single-view fusion still needs valid table information.
+Positive tunables fall back to their existing defaults. This preserves the previous
+invalid-value policy instead of creating a new HTTP error convention.
+
+When replacing a local runner, an explicitly reused cache is detached before closing the old
+runner and becomes the new runner's responsibility. A different old cache closes normally;
+if replacement construction fails, the supplied cache closes best-effort without hiding the
+original construction error. No new public API, schema or dependency is needed.

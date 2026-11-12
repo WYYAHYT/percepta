@@ -24,6 +24,7 @@ import traceback
 
 import numpy as np
 
+from .base import BackendRequestError
 from .protocol import (
     ProtocolError,
     RequestFrame,
@@ -111,7 +112,7 @@ def serve(config: dict) -> int:
                     )
                 )
             except Exception as exc:  # noqa: BLE001 - one bad request must not kill the worker
-                kind = "invalid_request" if isinstance(exc, (ValueError, KeyError)) else "unavailable"
+                kind = "invalid_request" if isinstance(exc, (BackendRequestError, ValueError, KeyError)) else "unavailable"
                 traceback.print_exc(file=sys.stderr)
                 _emit(_error_frame(exc, kind))
     finally:

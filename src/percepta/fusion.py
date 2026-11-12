@@ -179,7 +179,7 @@ def _context_value(context: dict[str, Any], key: str, default: float) -> float:
     value = context.get(key, default)
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return float(default)
     if not np.isfinite(number) or number <= 0.0:
         return float(default)
@@ -207,7 +207,7 @@ def _resolve_table(
     if plane_value is not None:
         try:
             plane = geo.parse_plane(plane_value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             warnings.append("invalid_table_plane")
             plane = None
         if plane is not None:
@@ -228,7 +228,7 @@ def _resolve_table(
     if table_z is not None:
         try:
             value = float(table_z)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             warnings.append("invalid_table_z")
         else:
             if np.isfinite(value):

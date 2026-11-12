@@ -52,7 +52,7 @@ __all__ = ["Sam3Tool", "Sam3BackendError"]
 NO_GEOMETRIC_PROMPT = "sam3_geometric_prompt_unavailable"
 
 
-class Sam3BackendError(RuntimeError):
+class Sam3BackendError(BackendRequestError):
     """The upstream SAM3 build could not satisfy the request (API drift, bad state)."""
 
 
@@ -437,7 +437,7 @@ class Sam3Tool(BaseTool):
         mask_b64 = ctx.options.masks
         try:
             masks, boxes, scores = self._backend.segment(prompt)
-        except (Sam3BackendError, BackendRequestError) as exc:
+        except BackendRequestError as exc:
             model, model_sha = self._model_meta()
             provenance = self._provenance(
                 ctx,

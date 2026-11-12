@@ -38,7 +38,9 @@ from percepta.schema import (
 )
 from percepta.tools.base import (
     BaseTool,
+    ToolError,
     ToolUnavailable,
+    UnsupportedPrompt,
     build_provenance,
     make_observation,
     make_percept,
@@ -755,6 +757,56 @@ def test_repeated_prompts_preserve_occurrences_without_multiplying_results(cache
     assert all(len(call) == len({prompt.model_dump_json() for prompt in call}) for call in tool.calls)
     response.percepts[0].observations[0].area_px = 123
     assert response.percepts[4].observations[0].area_px != 123
+
+
+@pytest.mark.parametrize("error", [UnsupportedPrompt, ToolUnavailable, ToolError])
+@pytest.mark.parametrize("warm_cache", [False, True])
+def test_failed_cache_misses_preserve_cached_and_repeated_prompt_results(
+    monkeypatch: pytest.MonkeyPatch, error: type[ToolError], warm_cache: bool,
+) -> None:
+    tool, cache = RecordingTool(), DictCache()
+    runner = make_runner(config_for([tool.name]), tool, cache=cache)
+    other = Prompt(type="text", text="blue block")
+    images = {CAM: synth.red_square_scene(), "cam_left": synth.red_square_scene()}
+    prompts = [TEXT, other, other, TEXT]
+    request = request_for(prompts, images=images, tools=[tool.name])
+    original_perceive, failed_calls = tool.perceive, []
+
+    def fail(_ctx, received):
+        failed_calls.append(received)
+        raise error("backend rejected this request")
+
+    try:
+        if warm_cache:
+            runner.perceive(request_for([TEXT], images=images, tools=[tool.name]))
+        monkeypatch.setattr(tool, "perceive", fail)
+        response = runner.perceive(request)
+        assert [(p.provenance.prompt.text, p.camera) for p in response.percepts] == [
+            (prompt.text, camera) for prompt in prompts for camera in sorted(images)
+        ]
+        failed_status = "invalid_request" if error is UnsupportedPrompt else "unavailable"
+        assert [p.status for p in response.percepts] == [
+            "ok" if warm_cache and prompt == TEXT else failed_status for prompt in prompts for _ in images
+        ]
+        assert [p.provenance.cache_hit for p in response.percepts] == [
+            warm_cache and prompt == TEXT for prompt in prompts for _ in images
+        ]
+        assert len(failed_calls) == 1
+        assert len(failed_calls[0]) == (1 if warm_cache else 2)
+        assert len(cache.keys) == int(warm_cache), "failed results must never enter the cache"
+        response.percepts[2].extras["changed"] = True
+        assert "changed" not in response.percepts[4].extras
+        expected_warning = "unsupported_prompt" if error is UnsupportedPrompt else "tool_unavailable"
+        assert expected_warning in response.warnings
+
+        monkeypatch.setattr(tool, "perceive", original_perceive)
+        recovered = runner.perceive(request)
+        assert all(p.status == "ok" for p in recovered.percepts)
+        assert [p.provenance.cache_hit for p in recovered.percepts] == [
+            warm_cache and prompt == TEXT for prompt in prompts for _ in images
+        ]
+    finally:
+        runner.close()
 
 
 def test_broken_cache_degrades_to_no_cache() -> None:

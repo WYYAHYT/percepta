@@ -1,8 +1,8 @@
 # 文档修订记录
 
-> **当前状态（2026-11-12 对 `9779a96` 再复查）**：D39坐标修复及D40–D43的20组改动已提交，
-> 本轮另确认4项P2与1项P3待修，含回归及既有遗漏。“20组全部关闭”是上一批次的结论，现已收窄。
-> 详见[复查与详细修复报告](reviews/2026-11-12-runtime-fix-review.md)及本页末尾；各批次原文保留。
+> **当前状态（2026-11-12 14:33，D44后续修复）**：复查中的R1–R5已按授权修复，新增27项回归；
+> 最终CPU测试930 passed、9 skipped，Ruff与真实HTTP e2e通过。原审计、复查发现和旧结论保留，
+> 本次旧代码／新代码、红绿证据及仍保留的边界见本页末尾；不将绿测等同于所有边界均已证明。
 
 ## 2026-11-12：对齐已部署实现，保留历史原文
 
@@ -320,3 +320,65 @@ service／SDK／CLI组63 passed，计数重叠不相加。另有真实CPU worker
 R1–R5均经root独立核对；R1／R2做父版本行为对照，R3／R4确认父源码已存在缺口。
 
 未运行GPU、模型精度、长期压力或跨机部署；原有 `.qoder/` 保持未跟踪；未推送／发布。
+
+## 2026-11-12：修复复查发现R1–R5（D44）
+
+- **修改日期**：2026-11-12，Asia/Shanghai（UTC+08:00）。
+- **记录整理时间**：同日14:33（UTC+08:00）。
+- **修改前Git基线**：`90d75d6`（运行时代码仍为 `9779a96`；前者只增加复查报告与记录）。
+- **用户授权**：“OK，先修复”，对应上一轮明确的R1–R5全部5项；不扩展此前3项辅助API待办。
+- **版本**：包仍0.3.0、schema仍percepta/v1、线协议版本与布局不变；规格修订号v0.3.0-doc.4。
+- **状态**：以下5个已复现问题已按对应回归修复；保留上一轮待修原文，不改写当时判断。
+
+本页顶部修改前原文：
+
+> **当前状态（2026-11-12 对 `9779a96` 再复查）**：D39坐标修复及D40–D43的20组改动已提交，
+> 本轮另确认4项P2与1项P3待修，含回归及既有遗漏。“20组全部关闭”是上一批次的结论，现已收窄。
+> 详见[复查与详细修复报告](reviews/2026-11-12-runtime-fix-review.md)及本页末尾；各批次原文保留。
+
+任何文件的完整旧源码／文档可从基线复查：
+
+```bash
+git show 90d75d6:src/percepta/backends/worker.py
+git show 90d75d6:src/percepta/pipeline.py
+git diff 90d75d6 -- src/percepta tests README.md percepta-SPEC.md docs CHANGELOG.md
+```
+
+### 修改前后与验证
+
+| 编号 | 修改前原代码／后果 | 修改后及原因 | 回归证据 |
+|---|---|---|---|
+| R1 | worker只检查 `isinstance(exc, (ValueError, KeyError))`；BackendRequestError／Sam3BackendError被编码unavailable，parent按终止故障回收，下一合法提示仍失败 | worker显式识别BackendRequestError；Sam3BackendError继承它，工具只需统一catch；请求错误保留worker，真正不可用仍终止 | 两类异常×进程内／子进程，验证invalid_request后合法提示成功、64px mask、PID不变、health正常 |
+| R2 | `_DeadlinePipe._wait()`及两处stderr泵使用 `select.select()`；高编号fd抛异常，使健康worker启动失败 | 共享期限IO与generic／foundation stderr都用poll；毫秒向上取整并检查原绝对deadline。MultiViewBackend复用该helper及stderr路径，无需重复实现 | 独立CPU子进程打开fd至1050以上；generic／stereo／multiview各自完成启动、推理、512KiB stderr排空及close，确认pipe编号>1023、stderr有界、进程及流／线程清理 |
+| R3 | 三类已声明工具异常中直接 `return self._fail_percepts(...misses...)`，跳过cached合并；重复提示若简单搬入produced还会再次放大 | 按unique_prompts生成失败组，统一走原顺序恢复／深复制；成功调用的cache写入放try/else，异常失败不缓存。ToolUnavailable已有ToolError父类，合并同义异常分支 | 三类异常×全冷／混合缓存，包含两相机、重复命中／未命中提示；检查数量／原输入顺序、状态、cache_hit、对象隔离、失败未写cache及后续恢复 |
+| R4 | fusion的 `_context_value`、table_plane、table_z三处仅捕获TypeError／ValueError；401位JSON整数转换抛OverflowError并HTTP500 | 三处补捕获OverflowError，进入原无效值处理。正数调参用默认；坏table信息带invalid_table_*；多视角仍用table_z_assumed的0m平面假设，单视角仍需有效桌面 | 3类超大整数×显式multi_view_3d／补充fuse两条HTTP路径；全部200／ok，Geometry与合法默认请求相同，table警告保留，step不新增警告 |
+| R5 | `_get_local_runner`先self.close，旧runner把同一cache关闭，随后仍将其交给新runner；get／put报错后缓存被禁用 | 仅显式cache与旧_cache为同一对象时detach旧cache再close工具；新runner接管，最终close一次。构造失败best-effort关闭传入cache，清理异常不盖原构造异常；换不同cache仍释放旧cache | config／registry／二者切换均保留命中；换新cache正常关闭旧cache；shared／new cache×cleanup是否报错的构造失败均无遗失资源且原异常不变 |
+
+新增回归共27项，先在旧实现运行再修源码：
+
+- R1／R2：7项中 **6 failed、1兼容通过 → 7 passed**；对应 `tests/unit/test_worker_recovery.py`。
+- R3：**6 failed → 6 passed**；对应 `tests/unit/test_pipeline.py` 的失败缓存未命中组合回归。
+- R4：**6 failed → 6 passed**；对应 `tests/contract/test_fusion_numeric_bounds.py` 的真实HTTP回归。
+- R5：8项中 **5 failed、3兼容通过 → 8 passed**；对应 `tests/unit/test_client_lifecycle.py` 的所有权／构造失败回归。
+
+针对性完整组：worker／SAM3／foundation／multiview共238 passed、1 deselected（20.49s）；
+服务／SDK及contract共163 passed（18.77s）；geometry／fusion／footprint及新HTTP共85 passed（32.15s）。
+这些组有重叠不相加；临时独立venv安装用例已纳入最终全套。
+
+### 最终验收与文档
+
+最后代码冻结后执行：
+
+- `uv run --locked pytest -o addopts= -q`：**930 passed、9 skipped**，69.55s；新增27项均纳入，较修复前903增加27。有1条既有Starlette/httpx弃用warning。
+- `uv run --locked ruff check .`：通过；`uv run --locked python scripts/e2e_smoke.py`：**E2E OK**，真实HTTP与本地输出一致、not_found仍HTTP200。
+- `uv run --locked python scripts/check_lock_portability.py`：6份锁均使用官方域名；无依赖／锁／资产变更。
+- 实现及文档交叉核对通过；README、规格主本／镜像、CHANGELOG与D44说明新增行为；本批保持审计原文，在复查报告追加同日修复状态。
+- 两份规格逐字一致，15个文档模型字段集合与实际schema一致；本批7份文档的20个唯一Markdown相对链接目标存在，`git diff --check`通过。
+
+本次不改变请求错误与真正模型不可用的区别，不移除启动／完整RPC期限，不缓存异常失败。
+poll支持本Linux部署及高fd，不由此新增Windows支持。几何无效值仍沿用既有默认／警告策略，
+不是将所有坏context统一改成HTTP400；尤其多视角的table_z_assumed仍为明确假设，非新的测量证据。
+
+没有运行GPU forward、模型精度、长期压力或跨机部署；未更换模型／权重，未新增公共API或依赖。
+此前3项低优先辅助API边界仍在待办（超大direct-fuse mask分配、PlaneGrid整数索引helper、
+极端长宽比grid上限）。原有 `.qoder/` 配置不纳入提交；修复仅保存在本地，未推送／发布。

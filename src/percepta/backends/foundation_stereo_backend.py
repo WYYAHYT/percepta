@@ -40,10 +40,10 @@ class _DeadlinePipe:
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("stereo worker deadline exceeded")
-        readable, writable, _ = select.select(
-            [] if writing else [self.fd], [self.fd] if writing else [], [], remaining,
-        )
-        if not (readable or writable) or time.monotonic() >= self.deadline:
+        poller = select.poll()
+        poller.register(self.fd, select.POLLOUT if writing else select.POLLIN)
+        events = poller.poll(math.ceil(remaining * 1000))
+        if not events or time.monotonic() >= self.deadline:
             raise TimeoutError("stereo worker deadline exceeded")
 
     def read(self, size: int) -> bytes:
@@ -162,9 +162,10 @@ class FoundationStereoBackend:
 
     def _drain_stderr(self, fd: int) -> None:
         try:
+            poller = select.poll()
+            poller.register(fd, select.POLLIN)
             while not self._stderr_stop.is_set():
-                readable, _, _ = select.select([fd], [], [], 0.05)
-                if not readable:
+                if not poller.poll(50):
                     continue
                 try:
                     chunk = os.read(fd, 4096)

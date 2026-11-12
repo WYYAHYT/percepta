@@ -8,6 +8,16 @@ changed. Every design decision referenced as `D<n>` lives in [`docs/decisions.md
 
 ## Unreleased
 
+### Follow-up review fixes — 2026-11-12
+
+* Preserve healthy workers after declared request errors, including SAM3 request errors;
+  use poll for shared pipe deadlines and stderr so high file descriptors work (D44).
+* Retain cached results when uncached prompts fail, without multiplying duplicate failures.
+* Handle overflowing silhouette-fusion inputs through existing invalid-value behavior, and
+  transfer reused closable caches across local runner replacement with cleanup on failure.
+* Keep the dated R1–R5 review findings and append repair evidence in
+  [`docs/documentation-changes.md`](docs/documentation-changes.md).
+
 ### Audit fixes — 2026-11-12
 
 * Isolate SAM3 image state per request and text/box state per prompt; enforce worker startup

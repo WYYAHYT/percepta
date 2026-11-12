@@ -1,5 +1,9 @@
 # 9779a96 修复复查与详细报告
 
+> **后续状态（2026-11-12 14:33，UTC+08:00）**：本报告R1–R5已按用户授权修复，新增27项回归；
+> 最终930 passed、9 skipped，Ruff与真实HTTP e2e通过。以下审查原文保留12:58时的判断，
+> 完整改动前后、红绿及剩余边界见[修改记录末尾](../documentation-changes.md)。
+
 **复查日期：2026-11-12，Asia/Shanghai（UTC+08:00）；报告整理时间：12:58。**
 报告最终核对时间为同日13:00。
 修复前基线为 `a761656`，被审查提交为 `9779a96`，共43个文件、2909行增加、307行删除。
@@ -167,3 +171,19 @@ table_plane → 500 {"error":"internal","message":"unexpected error while percei
 
 **未检查：** GPU forward／真实权重加载、任务精度、长期压力、跨机网络和systemd实机部署；不审计上游模型／虚拟环境依赖的全部内部实现。
 **交付判断：** 原有修复有明确效果，但应先补R1–R4再将这批改动标记为可靠性问题已全部关闭；使用可关闭自定义cache的调用者还需R5。
+
+**六、同日后续修复记录（14:33，UTC+08:00）**
+
+用户授权后，以上R1–R5分别完成回归与最小修复；本节仅追加当前状态，不改写前文复查结论。
+
+| 编号 | 当前状态 | 新增验证 |
+|---|---|---|
+| R1 | 已修：worker识别BackendRequestError，Sam3BackendError统一继承 | 真实worker拒绝提示后接受合法提示，PID不变；进程内语义一致 |
+| R2 | 已修：共享期限IO与两处stderr使用poll | generic／stereo／multiview均在高fd完成推理、512KiB stderr排空与完整关闭 |
+| R3 | 已修：unique失败组与命中结果统一恢复输入顺序 | 三类工具异常、全冷／混合缓存、重复提示与两相机；无丢失、无放大、失败不缓存 |
+| R4 | 已修：三处融合解析捕获OverflowError | 三类超大整数×两条真实HTTP路径返回既有默认／警告语义 |
+| R5 | 已修：复用cache转移至新runner，构造失败也清理 | config／registry切换、换不同cache、cleanup报错／替代构造失败；最终关闭一次 |
+
+新回归先红／兼容检查后绿，共27项；完整CPU为930 passed、9 skipped（69.55s）。
+Ruff和真实uvicorn e2e通过；详细逐项旧源码／新行为及分组证据见[修改记录](../documentation-changes.md)。
+没有重跑GPU或任务精度；此前3项辅助API边界仍待办，DNS／TLS同步取消及原生线程的既有边界未变。

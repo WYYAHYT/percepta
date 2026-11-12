@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import numpy as np
 import pytest
 
+from percepta.cache import PerceptCache
 from percepta.client import PerceptaClient, PerceptaError
 from percepta.config import AppConfig
 from percepta.registry import ToolRegistry
@@ -259,10 +260,10 @@ class _TrackedFake(FakeTool):
         super().close()
 
 
-def _call_local(client: PerceptaClient, registry: ToolRegistry, config: AppConfig):
+def _call_local(client: PerceptaClient, registry: ToolRegistry, config: AppConfig, cache=None):
     return client.perceive_local(
         {"cam": np.zeros((4, 4, 3), dtype=np.uint8)}, ["red block"], registry=registry,
-        config=config, options={"tools": ["fake"], "fuse": False},
+        config=config, cache=cache, options={"tools": ["fake"], "fuse": False},
     )
 
 
@@ -305,3 +306,87 @@ def test_failed_local_runner_replacement_does_not_keep_previous_resources(monkey
     assert client._local_runner is None
     client.close()
     assert tool.closed == 1
+
+
+class _ClosableCache(PerceptCache):
+    """A cache whose reads/writes stop working after its resource is released."""
+
+    def __init__(self, *, cleanup_raises: bool = False) -> None:
+        super().__init__()
+        self.close_calls = 0
+        self.cleanup_raises = cleanup_raises
+
+    def get(self, key):
+        if self.close_calls:
+            raise RuntimeError("cache is closed")
+        return super().get(key)
+
+    def put(self, key, value):
+        if self.close_calls:
+            raise RuntimeError("cache is closed")
+        super().put(key, value)
+
+    def close(self):
+        self.close_calls += 1
+        if self.cleanup_raises:
+            raise RuntimeError("cache cleanup failed")
+
+
+@pytest.mark.parametrize("replace", ["config", "registry", "both"])
+def test_replaced_runner_transfers_reused_cache_until_final_close(replace: str) -> None:
+    registry, config, cache = ToolRegistry(), AppConfig(), _ClosableCache()
+    with PerceptaClient() as client:
+        first = _call_local(client, registry, config, cache)
+        assert first.percepts[0].provenance.cache_hit is False
+        assert _call_local(client, registry, config, cache).percepts[0].provenance.cache_hit is True
+        previous = client._local_runner
+        if replace in {"registry", "both"}:
+            registry = ToolRegistry()
+        if replace in {"config", "both"}:
+            config = config.model_copy(deep=True)
+        assert _call_local(client, registry, config, cache).percepts[0].provenance.cache_hit is True
+        assert client._local_runner is not previous
+        assert previous._closed is True
+        assert previous._cache is None
+        assert cache.close_calls == 0
+    assert cache.close_calls == 1
+    client.close()
+    assert cache.close_calls == 1
+
+
+def test_replaced_runner_closes_old_cache_when_new_cache_is_supplied() -> None:
+    registry, config = ToolRegistry(), AppConfig()
+    previous_cache, replacement_cache = _ClosableCache(), _ClosableCache()
+    with PerceptaClient() as client:
+        _call_local(client, registry, config, previous_cache)
+        response = _call_local(client, registry, config, replacement_cache)
+        assert response.percepts[0].provenance.cache_hit is False
+        assert previous_cache.close_calls == 1
+        assert replacement_cache.close_calls == 0
+    assert previous_cache.close_calls == 1
+    assert replacement_cache.close_calls == 1
+
+
+@pytest.mark.parametrize("reuse_cache", [False, True])
+@pytest.mark.parametrize("cleanup_raises", [False, True])
+def test_failed_runner_replacement_releases_shared_or_new_cache_without_hiding_error(
+    monkeypatch: pytest.MonkeyPatch, reuse_cache: bool, cleanup_raises: bool,
+) -> None:
+    registry, config = ToolRegistry(), AppConfig()
+    previous_cache = _ClosableCache(cleanup_raises=cleanup_raises)
+    replacement_cache = previous_cache if reuse_cache else _ClosableCache(cleanup_raises=cleanup_raises)
+    client = PerceptaClient()
+    _call_local(client, registry, config, previous_cache)
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("cannot construct runner")
+
+    monkeypatch.setattr("percepta.pipeline.PipelineRunner", fail)
+    with pytest.raises(RuntimeError, match="cannot construct runner"):
+        _call_local(client, registry, config.model_copy(deep=True), replacement_cache)
+    assert client._local_runner is None
+    assert previous_cache.close_calls == 1
+    assert replacement_cache.close_calls == 1
+    client.close()
+    assert previous_cache.close_calls == 1
+    assert replacement_cache.close_calls == 1

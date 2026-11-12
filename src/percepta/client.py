@@ -28,6 +28,7 @@ import json
 import time
 import urllib.error
 import urllib.request
+from contextlib import suppress
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
@@ -485,7 +486,7 @@ class PerceptaClient:
         return runner.perceive(request)
 
     def _get_local_runner(self, config: AppConfig | None, registry: Any, cache: Any) -> Any:
-        """Reuse the in-process runner while the collaborator objects stay identical."""
+        """Reuse collaborators, or close the prior runner and transfer an explicitly reused cache."""
         from .pipeline import PipelineRunner
         from .registry import ToolRegistry
 
@@ -496,12 +497,21 @@ class PerceptaClient:
         )
         if self._local_runner is not None and key == self._local_key:
             return self._local_runner
+        if cache is not None and self._local_runner is not None and self._local_runner._cache is cache:
+            self._local_runner._cache = None  # The replacement takes ownership of the shared cache.
         self.close()
-        runner = PipelineRunner(
-            registry if registry is not None else ToolRegistry(),
-            config if config is not None else AppConfig(),
-            cache,
-        )
+        try:
+            runner = PipelineRunner(
+                registry if registry is not None else ToolRegistry(),
+                config if config is not None else AppConfig(),
+                cache,
+            )
+        except Exception:
+            close = getattr(cache, "close", None)
+            if callable(close):
+                with suppress(Exception):  # Preserve the construction error if cleanup also fails.
+                    close()
+            raise
         self._local_runner = runner
         self._local_key = key
         return runner

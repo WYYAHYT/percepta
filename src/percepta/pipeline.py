@@ -63,7 +63,6 @@ from .schema import (
 )
 from .tools.base import (
     ToolError,
-    ToolUnavailable,
     UnsupportedPrompt,
     build_provenance,
     make_percept,
@@ -513,10 +512,10 @@ class PipelineRunner:
                     produced = _coerce_percepts(tool.perceive(ctx, unique_prompts))
             except UnsupportedPrompt as exc:
                 _add_warning(warnings, "unsupported_prompt")
-                return self._fail_percepts(
+                produced = self._fail_percepts(
                     name,
                     ctx,
-                    [prompt for _, prompt in misses],
+                    unique_prompts,
                     version=version,
                     kind=caps.kind,
                     message="unsupported_prompt",
@@ -524,25 +523,13 @@ class PipelineRunner:
                     code="unsupported_prompt",
                     extra={"detail": str(exc)},
                 )
-            except ToolUnavailable as exc:
-                _add_warning(warnings, "tool_unavailable")
-                return self._fail_percepts(
-                    name,
-                    ctx,
-                    [prompt for _, prompt in misses],
-                    version=version,
-                    kind=caps.kind,
-                    message=f"{type(exc).__name__}: {exc}",
-                    status="unavailable",
-                    code="tool_unavailable",
-                )
             except ToolError as exc:
                 # Any other declared tool failure is a tool problem, never `not_found`.
                 _add_warning(warnings, "tool_unavailable")
-                return self._fail_percepts(
+                produced = self._fail_percepts(
                     name,
                     ctx,
-                    [prompt for _, prompt in misses],
+                    unique_prompts,
                     version=version,
                     kind=caps.kind,
                     message=f"{type(exc).__name__}: {exc}",
@@ -550,11 +537,12 @@ class PipelineRunner:
                     code="tool_unavailable",
                 )
 
-            if cache is not None:
-                for prompt in unique_prompts:
-                    group = [p for p in produced if p.provenance.prompt == prompt]
-                    if group:
-                        self._cache_put(cache, image_hashes, prompt, name, ctx.options, group)
+            else:
+                if cache is not None:
+                    for prompt in unique_prompts:
+                        group = [p for p in produced if p.provenance.prompt == prompt]
+                        if group:
+                            self._cache_put(cache, image_hashes, prompt, name, ctx.options, group)
 
         if not misses:
             return [p for index in range(len(supported)) for p in cached.get(index, [])]
