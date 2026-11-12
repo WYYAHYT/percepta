@@ -1,0 +1,324 @@
+{
+  "record_version": 1,
+  "tested_commit": "8255027af9d72bfa491d57f2b71d33eaead37b63",
+  "date": "2026-11-12",
+  "timezone": "Asia/Shanghai",
+  "started_at": "2026-11-12T17:45:02.610316+08:00",
+  "recorded_at": "2026-11-12T18:01:24.357815+08:00",
+  "purpose": "Final real-model deployment and local HTTP runtime acceptance",
+  "all_five_models_passed": true,
+  "runtime_source_tests_configs_locks_unchanged": true,
+  "unchanged_preflight_files_sha256": {
+    "uv.lock": "0de86c6bf1a9f25878913f78884948a51cf0073082010b4031f8eaec78607a2f",
+    "configs/local-da3.yaml": "0e084d5fe73f689ce44224ee13abb590712674329afe5aca48aa9c41c9faa484",
+    "configs/local-fast-foundation-stereo.yaml": "802f78d2c31764ee10fedc7b71dc11841e9adbd870868f837a0cefb11588d9bf",
+    "configs/local-foundation-stereo.yaml": "f8196758b152a2544f98460ef0c047a48f962d68638b6511871a936a32308015",
+    "configs/local-mvsanywhere.yaml": "3cf87e7a3937cee06eec81a80f203c7b9ba669c60ebad5a9874f261edc1a653c",
+    "configs/local-sam3.yaml": "29178b68c786d13d8d28b293506973ee4ca2e4eb40b1329ebb846ab163d33825",
+    "uv_envs/da3/uv.lock": "d006b35db98a36f1184bbfdfbca94e39e2bca028b780e7bf30d507b78c2e2f97",
+    "uv_envs/fast-foundation-stereo/uv.lock": "9f289ac003784ff2b0f65526250f3365c47ce7f40187b5b97380bd42ca904409",
+    "uv_envs/foundation-stereo/uv.lock": "cc140e4b0a3a36d289f9b2daedb79f8e6a919dd6e87f361a988c26293d734f35",
+    "uv_envs/mvsanywhere/uv.lock": "87df845702579e77de20a99cf9cdd4bb07ab7daf81e8c75f6410bab89576b1b6",
+    "uv_envs/sam3/uv.lock": "c8859fa953772a1c310b528f3e73dc82940314c0718905231cf18de043923938",
+    "uv_envs/da3/assets.json": "39305467ef8c78a1f6f49a0d43784881e0fbe467927dfc4a43a0d6c22bd96c6d",
+    "uv_envs/fast-foundation-stereo/assets.json": "6830fba50759267213ce0bb59294cf5a8800bb4eaa6d44bd71c60c98a96e1f69",
+    "uv_envs/foundation-stereo/assets.json": "1ce9710bfa55429e3c12989a0b241984303c43a8d51ac1b2dd93f71655caecf4",
+    "uv_envs/mvsanywhere/assets.json": "ce9aa85226034565f5c7506d723170de8605a565d310d3e8e282077dae9443ba"
+  },
+  "raw_evidence_directory": "checkpoints/validation-8255027-20261112-1745",
+  "raw_evidence_is_git_ignored": true,
+  "explicit_gpu_pytest_cases": {
+    "sam3": 4,
+    "foundation-stereo": 2
+  },
+  "standalone_smokes_are_not_counted_as_pytest_cases": true,
+  "models": [
+    {
+      "model": "sam3",
+      "result": "passed",
+      "physical_gpu": 0,
+      "python": "3.10.20",
+      "torch": "2.10.0+cu128",
+      "bundled_cuda": "12.8",
+      "device": "NVIDIA H20",
+      "config": "configs/local-sam3.yaml",
+      "checkpoint": "checkpoints/sam3.pt",
+      "checkpoint_sha256": "9999e2341ceef5e136daa386eecb55cb414446a00ac2b55eb2dfd2f7c3cf8c9e",
+      "checkpoint_hash_verified": true,
+      "checks": {
+        "cuda_tensor": true,
+        "real_gpu_inference": true,
+        "resident_reuse": true,
+        "repeated_output_agrees": true,
+        "local_http_agreement": true,
+        "missing_checkpoint_unavailable_health_error": true,
+        "killed_own_worker_unavailable": true,
+        "loaded_worker_rpc_timeout_unavailable_health_error": true,
+        "owned_process_pipes_threads_cleaned": true,
+        "terminal_failure_no_auto_restart": true
+      },
+      "details": {
+        "photo_size_wh": [
+          640,
+          427
+        ],
+        "instances": 3,
+        "local_http_pixel_agreement": true,
+        "readiness_and_real_warmup": {
+          "status": "ok",
+          "duration_ms": 15437.72800732404
+        },
+        "cache_hit_preserves_pixels": true,
+        "timeout_fault": "SIGSTOP on own loaded worker",
+        "rpc_timeout_s": 0.1,
+        "timeout_request_s": 0.47939127311110497
+      },
+      "evidence_files_sha256": {
+        "sam3-assets.json": "1e600ff03cb375a1364efc151cbff059c89e0a0e81dd56bf9260ba6d28003bda",
+        "sam3-env.json": "c4168c326a7c090e4238810b5d148054cec332f8ed9ae65aa0cb719b6b3eb3be",
+        "sam3-pytest.xml": "20fb10492da0db2ea18a3df2f53555cb2a67297b827ebc3c2ce3350dce8622fe",
+        "sam3-pytest.log": "14dd0af536e5a3db676424e0dd00947c119b42596ca6c61c3dd47de7dfd4803c",
+        "sam3-acceptance.py": "521eb6757ec0eb6a85e26e1ca7b2d99674dea1c2d1e25970cad9acab04bdf77f",
+        "sam3-acceptance.json": "9276543b763173988c5b70fee965bac6fcb886c5378144728d0c846e4f3db7ea",
+        "sam3-acceptance.stderr": "d5d428ae16bbb444a75a1e3974a20d1fc10503e47da54baeef88ed6488497600"
+      }
+    },
+    {
+      "model": "foundation-stereo",
+      "result": "passed",
+      "physical_gpu": 1,
+      "python": "3.11.13",
+      "torch": "2.4.1+cu124",
+      "bundled_cuda": "12.4",
+      "device": "NVIDIA H20",
+      "config": "configs/local-foundation-stereo.yaml",
+      "checkpoint": "checkpoints/foundation-stereo/model_best_bp2.pth",
+      "checkpoint_sha256": "60e79bde9c6a00acea551625ff814fe06e5a6806e2c0c9829baee248de87c5f1",
+      "checkpoint_hash_verified": true,
+      "checks": {
+        "cuda_tensor": true,
+        "real_gpu_inference": true,
+        "resident_reuse": true,
+        "repeated_output_agrees": true,
+        "local_http_agreement": true,
+        "missing_checkpoint_unavailable_health_error": true,
+        "killed_own_worker_unavailable": true,
+        "loaded_worker_rpc_timeout_unavailable_health_error": true,
+        "owned_process_pipes_threads_cleaned": true,
+        "terminal_failure_no_auto_restart": true
+      },
+      "details": {
+        "image_shape": [
+          540,
+          960,
+          3
+        ],
+        "warm_tool_ms": [
+          819.6057146415114,
+          815.7361261546612
+        ],
+        "valid_points": 469911,
+        "local_http_centroid_delta_m": 0.0,
+        "network_blocked_official_reference": true,
+        "rpc_timeout_s": 0.1,
+        "timeout_fault": "SIGSTOP on own loaded worker",
+        "timeout_request_s": 0.9587295986711979,
+        "local_http_all_geometry_fields_exactly_equal": true
+      },
+      "evidence_files_sha256": {
+        "foundation-stereo-environment.json": "68c92acb072e40c55881cbc9f7ab84e7e5537e3cd238214e2ccc49fb1d9f9548",
+        "foundation-stereo-acceptance.json": "576f486441318a66130c021516e34e3b4659dea590059b67e05fd68b59977028",
+        "foundation-stereo-smoke.json": "2d761a167b59eb820e8e89dee1e5f1442c44da670226515acb6e9ff90cadf74d",
+        "foundation-stereo-pytest.xml": "0adbfaf8941c28abb2df0d77ebe10911c3545e5312c0300443653c09d7b7c74a",
+        "foundation-stereo-timeout-probe.py": "2682622f652fa99304c12a846ee41beef3cbf348bdb4ede785745e8e72c73ba4",
+        "foundation-stereo-timeout.json": "5824652bcc08422eb69b57d3a4a387065e1d2a67c94f1ee435bd56c2010b923c"
+      }
+    },
+    {
+      "model": "fast-foundation-stereo",
+      "result": "passed",
+      "physical_gpu": 2,
+      "python": "3.12.13",
+      "torch": "2.6.0+cu124",
+      "bundled_cuda": "12.4",
+      "device": "NVIDIA H20",
+      "config": "configs/local-fast-foundation-stereo.yaml",
+      "checkpoint": "checkpoints/fast-foundation-stereo/model_best_bp2_serialize.pth",
+      "checkpoint_sha256": "af0658f289ec840b292645f8d5538978f06e8cabaa1fd31e84acc91af268e990",
+      "checkpoint_hash_verified": true,
+      "checks": {
+        "cuda_tensor": true,
+        "real_gpu_inference": true,
+        "resident_reuse": true,
+        "repeated_output_agrees": true,
+        "local_http_agreement": true,
+        "missing_checkpoint_unavailable_health_error": true,
+        "killed_own_worker_unavailable": true,
+        "loaded_worker_rpc_timeout_unavailable_health_error": true,
+        "owned_process_pipes_threads_cleaned": true,
+        "terminal_failure_no_auto_restart": true
+      },
+      "details": {
+        "warm_tool_ms": [
+          277.27793995290995,
+          277.6323910802603
+        ],
+        "local_http_all_geometry_fields_exactly_equal": true,
+        "network_blocked_official_reference": true,
+        "maximum_reference_disparity_delta_px": 0.0,
+        "rpc_timeout_s": 0.01,
+        "timeout_fault": "deliberately short full RPC budget after successful real inference",
+        "timeout_request_s": 0.741789317689836
+      },
+      "evidence_files_sha256": {
+        "fast-foundation-stereo-environment.json": "c24da68c06a70cb70d07cf29ed5e8c71714744d4926e98bfdf6cf0042e28d97b",
+        "fast-foundation-stereo-summary.json": "a072ac5df7e427eefcd35a4cff2638f29006cf0263192a79d5b0a44db831639c",
+        "fast-foundation-stereo-smoke.json": "b1c1efcdff3e5e3964fd5499f3add8b01cea65d41c180525149d20c3dcbd138d",
+        "fast-foundation-stereo-assertions.py": "b17e986bd631ee202462e17da93a4ff8535a9304808501701c43dd4695ce6a69",
+        "fast-foundation-stereo-assertions.json": "a781b548aff247cfa021bde3e270acfcafbfdd1a74c8cece4d3d3884d4742147",
+        "fast-foundation-stereo-cleanup.json": "0498313b90e9d561034ca2e987eb876152f9dfb0461d1a2322a65235809ce1ce"
+      }
+    },
+    {
+      "model": "mvsanywhere",
+      "result": "passed",
+      "physical_gpu": 3,
+      "python": "3.10.20",
+      "torch": "2.1.2+cu118",
+      "bundled_cuda": "11.8",
+      "device": "NVIDIA H20",
+      "config": "configs/local-mvsanywhere.yaml",
+      "checkpoint": "checkpoints/mvsanywhere/mvsanywhere_hero.ckpt",
+      "checkpoint_sha256": "00878bab903b1d384cd6bb9ea092e247a9036d429cb8bcc3d6dcbb81f67e556d",
+      "checkpoint_hash_verified": true,
+      "checks": {
+        "cuda_tensor": true,
+        "real_gpu_inference": true,
+        "resident_reuse": true,
+        "repeated_output_agrees": true,
+        "local_http_agreement": true,
+        "missing_checkpoint_unavailable_health_error": true,
+        "killed_own_worker_unavailable": true,
+        "loaded_worker_rpc_timeout_unavailable_health_error": true,
+        "owned_process_pipes_threads_cleaned": true,
+        "terminal_failure_no_auto_restart": true
+      },
+      "details": {
+        "adapter_checks": {
+          "repeated_consistent": true,
+          "upstream_reference_consistent": true,
+          "world_basis_consistent": true,
+          "network_blocked": true,
+          "world_basis_depth_max_abs_diff_m": 0.0
+        },
+        "http_checks": {
+          "direct_geometry_agrees": true,
+          "repeat_agrees": true,
+          "killed_worker_status": "unavailable",
+          "killed_worker_health": "error"
+        },
+        "warm_tool_ms": [
+          675.2596963196993
+        ],
+        "rpc_timeout_s": 1e-05,
+        "timeout_fault": "deliberately short full RPC budget after successful real inference",
+        "timeout_request_s": 0.4703200859948993,
+        "local_http_geometry_fields_explicitly_compared": [
+          "centroid"
+        ]
+      },
+      "evidence_files_sha256": {
+        "mvsanywhere-environment.json": "4f4efdae39529522c2e173e2e879a0dfbdf6bfdbea6ee3f2d5fd38dfaa823918",
+        "mvsanywhere-adapter.json": "bfca56917237a9e4bf505ad72d765cadb5ac075143a1045b677785da14593561",
+        "mvsanywhere-tool-http.json": "ebe960a17c1405e5e5e30d3b705f8a8be73ecdf04b7ef39c6148a295a0d8dec8",
+        "mvsanywhere-faults.json": "14fd88fe0e4de82248be13a07b894d35b85de54c21bf9fdb291ee54efd8ed514",
+        "mvsanywhere-adapter-command.json": "8ae49fb6a1ebbeabe9a216a7b726e3ff657e2fd704d465f563a34ecfa2e9bf58",
+        "mvsanywhere-tool-http-command.json": "6262cff87d5abc3aaeb57edd8d7eeea5fe2256a074cf2b7924a38f692af9d266",
+        "mvsanywhere-faults-command.json": "88acee06411746e1c9b9bb67d10de4bea143d64b49760c0115ea317c5e8c7963",
+        "mvs-da3-runtime-metadata-probe.py": "393e09191ff3c5e23f8db52b4c6dd9d06ba45716fd2e697c0c3ae96e96667edc",
+        "mvs-da3-fault-probe.py": "678aa2d814e537e71e0c7cd5a93a6fba337037a7c263acd5501c34b05ec35796"
+      }
+    },
+    {
+      "model": "da3",
+      "result": "passed",
+      "physical_gpu": 3,
+      "python": "3.12.13",
+      "torch": "2.11.0+cu128",
+      "bundled_cuda": "12.8",
+      "device": "NVIDIA H20",
+      "config": "configs/local-da3.yaml",
+      "checkpoint": "checkpoints/da3/model.safetensors",
+      "checkpoint_sha256": "e01067dc1659613083d9145a9a2547ccdbe6ccbbf83c4fe7b3e8a4e2bdae78b5",
+      "checkpoint_hash_verified": true,
+      "checks": {
+        "cuda_tensor": true,
+        "real_gpu_inference": true,
+        "resident_reuse": true,
+        "repeated_output_agrees": true,
+        "local_http_agreement": true,
+        "missing_checkpoint_unavailable_health_error": true,
+        "killed_own_worker_unavailable": true,
+        "loaded_worker_rpc_timeout_unavailable_health_error": true,
+        "owned_process_pipes_threads_cleaned": true,
+        "terminal_failure_no_auto_restart": true
+      },
+      "details": {
+        "adapter_checks": {
+          "repeat_agrees": true,
+          "metric_scale_agrees": true,
+          "doubled_baseline_depth_ratio": 2.0,
+          "world_origin_agrees": true,
+          "world_origin_max_depth_differences_m": [
+            0.0,
+            0.0
+          ],
+          "network_blocked": true
+        },
+        "http_checks": {
+          "direct_geometry_agrees": true,
+          "repeat_agrees": true,
+          "killed_worker_status": "unavailable",
+          "killed_worker_health": "error",
+          "invalid_shape_preserves_worker": true
+        },
+        "warm_tool_ms": [
+          288.6328436434269
+        ],
+        "rpc_timeout_s": 1e-05,
+        "timeout_fault": "deliberately short full RPC budget after successful real inference",
+        "timeout_request_s": 0.2865374283865094,
+        "local_http_geometry_fields_explicitly_compared": [
+          "centroid"
+        ]
+      },
+      "evidence_files_sha256": {
+        "da3-environment.json": "cff365b6f5db6d14ecd2ffd4f848db4b5257fb7d0a1850cad4800439606c213a",
+        "da3-adapter.json": "0388ff19055e1fc9b650de635ab901eec168f0a2bab537047078a9ba77202672",
+        "da3-tool-http.json": "7e18d62c19a0199eaf524bbb6611ebf84d5142ae875c6420821122cabe2ddd2a",
+        "da3-faults.json": "ccb52d9f822d78bb4ee72f75c0a765d7b109cc336ca2fe656e3ba625a533e5e2",
+        "da3-adapter-command.json": "2b4cecd5e36dc0be74635869d4fec8b6d3f2cafcd3a7304d9a50038bdf0be78b",
+        "da3-tool-http-command.json": "6a0b219ab771690db5a78a63fc307752d2e94c23406a053b889790e40ed9fd6c",
+        "da3-faults-command.json": "f54fd45906da0d99d8a40adb58cf6b6650e9b1d1b5d259de5b430c7043ff0eee",
+        "mvs-da3-runtime-metadata-probe.py": "393e09191ff3c5e23f8db52b4c6dd9d06ba45716fd2e697c0c3ae96e96667edc",
+        "mvs-da3-fault-probe.py": "678aa2d814e537e71e0c7cd5a93a6fba337037a7c263acd5501c34b05ec35796"
+      }
+    }
+  ],
+  "remaining_percepta_worker_pids": [],
+  "cleanup_note": "All validation workers were reaped. Other jobs started after validation; global GPU usage is not evidence of validation leaks.",
+  "previous_cpu_validation": {
+    "commit": "8255027",
+    "passed": 1030,
+    "skipped": 9,
+    "elapsed_s": 69.2,
+    "rerun_in_this_batch": false
+  },
+  "limits": [
+    "No task accuracy evaluation or RoboDojo integration",
+    "No long-running pressure or cross-host HTTP validation",
+    "No release, remote push, model migration or asset replacement",
+    "SAM3 compares the same adapter in local/HTTP paths; not a separate official-reference implementation",
+    "RPC timeout budgets were deliberately injected after proving real loaded-worker inference; budgets exclude encoding and cleanup time"
+  ]
+}

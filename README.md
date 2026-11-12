@@ -465,6 +465,11 @@ spec left room. Later stereo/triview tests extend those original scenarios. Hist
 measurements are dated in [`docs/model-isolation.md`](docs/model-isolation.md) §§10–12;
 they establish deployment behavior for those runs, not guarantees for every input or host.
 
+All five models passed real GPU and loopback HTTP revalidation on **2026-11-12**, against
+runtime commit `8255027`, including missing checkpoints, killed workers, injected RPC
+timeouts and cleanup. See the [dated acceptance report](docs/reviews/2026-11-12-model-deployment-validation.md)
+for the exact comparison scope, environment versions, asset hashes and evidence.
+
 ## License
 
 The percepta library is Apache-2.0. Model weights are **not** distributed here: SAM3 weights

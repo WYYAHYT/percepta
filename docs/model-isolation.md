@@ -19,6 +19,10 @@
 > 首次模型加载使用同一 per-tool 锁；HTTP504 后仍计算的任务继续占准入位，shutdown 等待
 > 实际请求和预热结束再关闭工具。上述生命周期覆盖已补 CPU worker／真实 HTTP 回归；
 > §10–§12 的 GPU smoke 数字保留为原部署时的证据，本次未重跑 GPU 或更换资产。
+>
+> **最终版本验收（2026-11-12，运行源码 `8255027`）**：后续已重新执行五模型真实GPU＋
+> loopback HTTP验收，包含缺权重、终止本次worker、已加载worker的RPC超时与资源清理，均通过。
+> 本页上方“本次未重跑GPU”是D40–D43批次的历史范围，未改写；本次结果见§13及独立验收报告。
 
 ---
 
@@ -683,3 +687,28 @@ CUDA_VISIBLE_DEVICES=4 OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=1 uv run pytest -m
 另建不含 torch/OpenCV 的默认环境跑过完整 CPU 回归，并补验最后的可选依赖错误分支。
 Fast-FoundationStereo 与 MVSAnywhere 的研究权重仅供非商业研究，DA3-BASE 为 Apache-2.0。
 本轮交付是模型部署与工具接入，不包含 RoboDojo 的目标定位精度、Policy SR/Score 实测。
+
+## 13. 最终版本五模型GPU＋HTTP验收（2026-11-12）
+
+验收运行源码为`8255027`，覆盖D39–D47之后的当前实现。五套既有运行时均实际完成CUDA
+tensor、模型推理、常驻复用、重复结果及本地／真实loopback HTTP核对；缺checkpoint、
+主动终止本次worker、已加载worker完整RPC超时及清理均通过。运行源码、配置、依赖、锁和
+权重没有改变，历史§10–§12记录保留。
+
+| 模型 | 本轮正常路径核对 | 故障／清理 |
+|---|---|---|
+| SAM3 | 真实花朵照片；本地／HTTP mask逐像素一致；实际预热／readiness及缓存命中；已有4项GPU pytest通过 | 通过 |
+| FoundationStereo | 官方双目、禁网官方视差对照；本地／HTTP全部Geometry字段相同；已有2项GPU pytest通过 | 通过 |
+| Fast-FoundationStereo | 官方双目、禁网官方视差最大差0.0px；本地／HTTP全部Geometry字段相同 | 通过 |
+| MVSAnywhere HERO | 官方三图、禁网官方内存入口／世界变换对照；本地／HTTP centroid一致 | 通过 |
+| DA3-BASE | 禁网重复／米制基线比例／大世界原点对照；本地／HTTP centroid一致；坏尺寸拒绝后复用worker | 通过 |
+
+详细环境、实测时间、故障注入方式、原始证据目录和限制见
+[最终验收报告](reviews/2026-11-12-model-deployment-validation.md)与
+[精简JSON证据](reviews/2026-11-12-model-deployment-validation.json)。
+本轮GPU pytest为6项；其余使用既有smoke及补充assert，不把脚本阶段数计入pytest总数。
+此前同源码CPU验收为1030 passed、9 skipped，本轮没有重复CPU全套。
+
+RPC预算不包含HTTP编解码／故障进程回收；超时测试是刻意注入，并非正常模型自行失败。
+本轮所有模型worker均已清理；这是部署运行验收，不包含任务精度、长期压力或跨机验证，
+也没有发布、推送或将五个服务长期启动。

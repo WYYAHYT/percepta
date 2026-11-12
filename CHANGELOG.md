@@ -60,6 +60,9 @@ changed. Every design decision referenced as `D<n>` lives in [`docs/decisions.md
 
 ### Documentation — 2026-11-12
 
+* Revalidate all five deployed models on runtime commit `8255027` with real GPU and loopback
+  HTTP, including missing checkpoints, killed workers, injected RPC deadlines and cleanup.
+  Preserve earlier deployment logs and add a dated report with compact JSON evidence.
 * Align the specification, README, deployment notes, configuration guidance and source
   documentation with implementation checkpoint `534066a`. Record the previous wording,
   replacement and reason in [`docs/documentation-changes.md`](docs/documentation-changes.md).

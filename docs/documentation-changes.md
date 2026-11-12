@@ -1,8 +1,8 @@
 # 文档修订记录
 
-> **当前状态（2026-11-12，D47临时失败缓存修复）**：含unavailable／timeout的提示相机组不再写缓存，
-> 新增12项回归，最终CPU测试1030 passed、9 skipped，Ruff与真实HTTP e2e通过。修复后再扫描
-> 未确认新的严重问题；旧行为、先红后绿、复查范围与限制见页末，此前各批次原文保留。
+> **当前状态（2026-11-12，五模型最终验收）**：运行源码`8255027`的五模型真实GPU＋HTTP
+> 验收均通过，包含常驻复用、结果核对、缺权重、worker退出、RPC超时和清理。此前CPU验收为
+> 1030 passed、9 skipped；本轮没有重复CPU全套。新证据与历史原文见页末及独立验收报告。
 
 ## 2026-11-12：对齐已部署实现，保留历史原文
 
@@ -580,3 +580,70 @@ git diff 4ab7597 -- src/percepta/pipeline.py tests/unit/test_pipeline.py tests/c
 四套神经几何配置还关闭缓存，不能泛称它们原本都存在同样的恢复损害。
 本轮未运行GPU、任务精度、长期压力或跨机部署；没有扩展RoboDojo接入。
 原有`.qoder/`保持未跟踪；修复仅保存在本地Git，未推送／发布。
+
+## 2026-11-12：最终版本五模型真实GPU＋HTTP验收
+
+- **验收日期／时段**：2026-11-12约17:44–17:56，Asia/Shanghai（UTC+08:00）；本记录在验收完成后整理。
+- **运行源码基线**：`8255027af9d72bfa491d57f2b71d33eaead37b63`，`fix: keep transient perception failures out of cache`。
+- **用户授权**：“可以，按照你的建议去做下一步”；对应最终版本五模型真实GPU／HTTP、故障处理与验收记录。
+- **运行修改**：无。未修改源码、测试、脚本、配置、依赖、锁、模型源码或权重；只新增验收报告／精简JSON并追加部署说明。
+- **版本**：包0.3.0、schema percepta/v1、线协议和规格修订号v0.3.0-doc.7不变；本批没有新增行为或接口决策。
+- **结果**：SAM3、FoundationStereo、Fast-FoundationStereo、MVSAnywhere HERO、DA3-BASE全部通过，没有发现新的部署阻塞。
+
+### 修改前内容与后续说明
+
+本页顶部修改前原文：
+
+> **当前状态（2026-11-12，D47临时失败缓存修复）**：含unavailable／timeout的提示相机组不再写缓存，
+> 新增12项回归，最终CPU测试1030 passed、9 skipped，Ruff与真实HTTP e2e通过。修复后再扫描
+> 未确认新的严重问题；旧行为、先红后绿、复查范围与限制见页末，此前各批次原文保留。
+
+部署文档D40–D43说明中的原句完整保留：
+
+> §10–§12 的 GPU smoke 数字保留为原部署时的证据，本次未重跑 GPU 或更换资产。
+
+这句话描述此前修复批次，不能再概括本轮。现在在其后增加带日期的后续说明，并追加§13。
+README原测试说明只引用历史H20部署记录，本轮保留原句并另加最终验收入口；CHANGELOG追加
+验证记录。新增以下文件，无被覆盖的旧版内容：
+
+- [五模型验收报告](reviews/2026-11-12-model-deployment-validation.md)：环境、输入、断言范围、故障方法、命令和限制。
+- [机器可读验收记录](reviews/2026-11-12-model-deployment-validation.json)：完整checkpoint SHA256、15份配置／锁／manifest快照、原始证据hash及每模型结果。
+
+完整旧内容可从`git show 8255027:docs/model-isolation.md`或对应README／CHANGELOG／本页路径读取；
+本批不重写旧部署、审计或修复记录，不改动规格主本及镜像。
+
+### 实际验证
+
+| 模型 | 环境与正常路径 | 故障路径 |
+|---|---|---|
+| SAM3 | GPU0；Python3.10.20／torch2.10.0+cu128；真实照片；常驻重复、本地／HTTP mask逐像素一致、真实预热／readiness及缓存命中；已有GPU pytest **4 passed** | 缺权重、终止本次worker、暂停已加载worker并注入100ms RPC期限；均按unavailable处理，health及清理通过 |
+| FoundationStereo | GPU1；Python3.11.13／torch2.4.1+cu124；官方图像；禁网上游视差对照，本地／HTTP全部Geometry字段相同；已有GPU pytest **2 passed** | 缺权重、终止本次worker、暂停已加载worker并注入100ms RPC期限；均通过 |
+| Fast-FoundationStereo | GPU2；Python3.12.13／torch2.6.0+cu124；官方图像；禁网上游视差最大差0.0px，本地／HTTP全部Geometry字段相同 | 缺权重、终止本次worker、已健康推理worker的10ms RPC期限；均通过 |
+| MVSAnywhere HERO | GPU3；Python3.10.20／torch2.1.2+cu118；官方三图；禁网内存API／重复／官方入口／世界变换对照，真实常驻工具＋HTTP centroid一致 | 缺权重、终止本次worker、已健康推理worker的0.01ms RPC期限；均通过 |
+| DA3-BASE | 顺序使用GPU3；Python3.12.13／torch2.11.0+cu128；禁网重复／基线比例／大世界原点对照，常驻工具＋HTTP centroid一致、坏尺寸拒绝后复用 | 缺权重、终止本次worker、已健康推理worker的0.01ms RPC期限；均通过 |
+
+五套独立环境都实际执行CUDA tensor运算；checkpoint hash与原配置一致。沿用已有锁定的
+cu118／cu124／cu128栈，没有升级或重装。所有被预检记录的配置／锁／manifest在结束后再次
+核对均未改变，运行源码及测试也与验收基线相同。
+
+本轮明确运行的GPU pytest合计6项，无跳过；其余为既有smoke和补充assert，不将阶段数量
+算成pytest测试数。此前同源码CPU验收1030 passed、9 skipped沿用原记录，本轮没有重跑全套。
+没有观察到未通过的验收阶段；计时、stdout／stderr、probe副本及原始JSON保存在新的
+`checkpoints/validation-8255027-20261112-1745/`忽略目录，没有覆盖旧smoke或提交权重／图片。
+
+收尾检查：`uv run --locked --no-sync ruff check .`、6份锁可移植性及`git diff --check`通过；
+精简JSON引用的原始证据hash逐一匹配，15份预检文件hash未变、运行源码／测试／配置／锁
+保持验收基线；规格主本与镜像逐字一致，5份修改Markdown的14个唯一本地链接目标存在。
+
+### 作用范围与收尾
+
+全部故障注入仅操作本次创建的worker，缺权重、退出和RPC超时正确返回不可用、health=error；
+记录的进程已回收、管道关闭、stderr线程停止、后续不自动重启。最后检查没有percepta模型
+worker残留；之后其他任务占用GPU，不将整机必须空闲作为本轮清理条件，也没有干预其他任务。
+
+RPC期限不包含HTTP编码／解码和故障清理，不能把0.01／10／100ms预算等同外层HTTP返回时间。
+SAM3比较同一adapter两种调用路径，三目HTTP显式比较centroid；未宣称所有模型都做了独立
+官方实现或全部Geometry字段对照。完整比较范围和单次实测值见验收报告。
+
+本批完成部署运行验收；没有执行RoboDojo接入、任务精度、长期压力或跨机部署，也没有
+发布／推送、迁移环境或将服务长期启动。原有`.qoder/`保持未跟踪。
