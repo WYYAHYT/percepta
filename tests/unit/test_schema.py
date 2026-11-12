@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 
+import numpy as np
 import pytest
 from pydantic import ValidationError
 
@@ -120,6 +123,73 @@ def test_calibration_matrix_shapes():
         _calibration(K=[[1, 0], [0, 1]])
     with pytest.raises(ValidationError, match="T_world_cam must be 4x4"):
         _calibration(T_world_cam=[[1, 0, 0], [0, 1, 0], [0, 0, 1]])
+
+
+@pytest.mark.parametrize(
+    "intrinsics",
+    [
+        [[0, 0, 320], [0, 0, 240], [0, 0, 1]],
+        [[0, 0, 320], [0, 288, 240], [0, 0, 1]],
+        [[288, 0, 320], [0, -288, 240], [0, 0, 1]],
+        [[288, 1, 320], [0, 288, 240], [0, 0, 1]],
+        [[288, 0, 320], [1, 288, 240], [0, 0, 1]],
+        [[288, 0, 320], [0, 288, 240], [0.1, 0, 1]],
+    ],
+)
+def test_calibration_rejects_nonphysical_pinhole_intrinsics(intrinsics):
+    with pytest.raises(ValidationError, match="pinhole"):
+        _calibration(K=intrinsics)
+
+
+@pytest.mark.parametrize(
+    "transform",
+    [
+        np.zeros((4, 4)).tolist(),
+        np.diag([2.0, 1.0, 1.0, 1.0]).tolist(),
+        np.diag([-1.0, 1.0, 1.0, 1.0]).tolist(),
+        [[1, 0.1, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+        [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0.1, 0, 0, 1]],
+    ],
+)
+def test_calibration_rejects_nonrigid_camera_to_world(transform):
+    with pytest.raises(ValidationError, match="rigid"):
+        _calibration(T_world_cam=transform)
+
+
+def test_calibration_accepts_float32_rounding_noise_without_changing_values():
+    original = _calibration()
+    intrinsics = np.asarray(original.K)
+    intrinsics[0, 1] = 1e-10
+    intrinsics[2, 0] = -1e-10
+    transform = np.asarray(original.T_world_cam)
+    transform[0, 0] += 2e-8
+    transform[3, 0] = 1e-10
+    calibration = _calibration(K=intrinsics.tolist(), T_world_cam=transform.tolist())
+    assert calibration.K == intrinsics.tolist()
+    assert calibration.T_world_cam == transform.tolist()
+
+
+def test_calibration_validation_preserves_slim_worker_imports():
+    code = '''
+import importlib.abc
+import sys
+
+class RejectHeavy(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        blocked = {"PIL", "torch", "cv2", "yaml", "fastapi", "percepta.geometry", "percepta.masks"}
+        if any(fullname == name or fullname.startswith(name + ".") for name in blocked):
+            raise AssertionError("unexpected dependency: " + fullname)
+
+sys.meta_path.insert(0, RejectHeavy())
+from percepta.schema import Calibration
+import percepta.backends.protocol
+import percepta.backends.multiview_protocol
+
+Calibration(camera="cam", width=8, height=8, K=[[100,0,4],[0,100,4],[0,0,1]],
+            T_world_cam=[[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]])
+'''
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
 
 
 def test_calibration_depth_must_match_resolution():

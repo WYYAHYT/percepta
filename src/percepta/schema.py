@@ -21,6 +21,8 @@ from typing import Any, Literal
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ._calibration import pinhole_intrinsics, rigid_transform
+
 # ---------------------------------------------------------------------------
 # §3.1 Enumerations
 # ---------------------------------------------------------------------------
@@ -131,7 +133,7 @@ class DepthRef(_Forbid):
 
 
 class Calibration(_Forbid):
-    """Camera intrinsics plus ``T_world_cam`` (camera -> world, spec §4.3)."""
+    """Zero-skew pinhole intrinsics and rigid ``T_world_cam`` (camera -> world metres)."""
 
     camera: str
     width: int
@@ -143,10 +145,8 @@ class Calibration(_Forbid):
 
     @model_validator(mode="after")
     def _check_matrix_shapes(self) -> Calibration:
-        if len(self.K) != 3 or any(len(row) != 3 for row in self.K):
-            raise ValueError("Calibration.K must be 3x3")
-        if len(self.T_world_cam) != 4 or any(len(row) != 4 for row in self.T_world_cam):
-            raise ValueError("Calibration.T_world_cam must be 4x4")
+        pinhole_intrinsics(self.K)
+        rigid_transform(self.T_world_cam)
         if self.width <= 0 or self.height <= 0:
             raise ValueError("Calibration.width/height must be > 0")
         if self.depth is not None and tuple(self.depth.shape) != (self.height, self.width):
@@ -272,8 +272,8 @@ class PerceiveOptions(Frozen):
     tools: list[str] | None = None  # None = default pipeline
     fuse: bool = True
     masks: MaskEncoding = "rle"
-    min_score: float = 0.2
-    top_k: int = 1
+    min_score: float = Field(default=0.2, ge=0.0, le=1.0)
+    top_k: int = Field(default=1, ge=1)
     timeout_ms: int = 120_000
     cache: bool = True
 
@@ -292,6 +292,12 @@ class PerceiveRequest(Frozen):
             raise ValueError("PerceiveRequest.images must contain at least one camera")
         if not self.prompts:
             raise ValueError("PerceiveRequest.prompts must contain at least one prompt")
+        # Resolve before SDK serialization so explicit default values survive HTTP parsing.
+        self.prompts = [
+            prompt.model_copy(update={field: getattr(self.options, field) for field in ("min_score", "top_k")
+                                      if field not in prompt.model_fields_set}, deep=True)
+            for prompt in self.prompts
+        ]
         for cam, calib in self.calibration.items():
             if cam != calib.camera:
                 raise ValueError(

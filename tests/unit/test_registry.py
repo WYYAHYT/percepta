@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 from percepta.registry import ToolLoadError, ToolRegistry, UnknownTool
@@ -50,6 +53,36 @@ def test_instance_is_a_singleton_and_loads_once(registry):
     assert first is second
     assert registry.entry("fake").status == "ok"
     assert first.capabilities().kind == "fake"
+
+
+def test_concurrent_first_load_constructs_only_one_instance():
+    entered = threading.Event()
+    second_load = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    class SlowTool(_BoxOnly):
+        def load(self, config):
+            calls.append(self)
+            entered.set()
+            if len(calls) > 1:
+                second_load.set()
+            assert release.wait(2)
+            super().load(config)
+
+    registry = ToolRegistry(discover=False)
+    registry.register("box_only", SlowTool)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(registry.instance, "box_only")
+        try:
+            assert entered.wait(1)
+            second = pool.submit(registry.instance, "box_only")
+            second_load.wait(0.2)
+        finally:
+            release.set()
+        assert first.result(timeout=2) is second.result(timeout=2)
+    assert len(calls) == 1
+    registry.close_all()
 
 
 def test_unknown_tool_raises(registry):
@@ -104,6 +137,33 @@ def test_failed_tool_load_is_reported_as_tool_load_error(registry):
         registry.instance("broken")
     assert registry.entry("broken").status == "error"
     assert "no weights" in (registry.entry("broken").error or "")
+
+
+@pytest.mark.parametrize("cleanup_raises", [False, True])
+def test_failed_capability_declaration_closes_unpublished_tool(cleanup_raises):
+    loaded = []
+
+    class BrokenDeclaration(_BoxOnly):
+        def load(self, config):
+            super().load(config)
+            self.closed = False
+            loaded.append(self)
+
+        def capabilities(self):
+            raise RuntimeError("bad capability declaration")
+
+        def close(self):
+            self.closed = True
+            if cleanup_raises:
+                raise RuntimeError("cleanup failed too")
+
+    registry = ToolRegistry(discover=False)
+    registry.register("box_only", BrokenDeclaration)
+    for _ in range(2):
+        with pytest.raises(ToolLoadError, match="bad capability declaration"):
+            registry.instance("box_only")
+    assert registry.entry("box_only").instance is None
+    assert len(loaded) == 2 and all(tool.closed for tool in loaded)
 
 
 def test_tool_context_carries_upstream_extras():

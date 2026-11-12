@@ -126,8 +126,9 @@ def _coerce_percepts(value: Any) -> list[Percept]:
 
 def _set_cache_hit(percept: Percept) -> Percept:
     """Copy a cached Percept with ``provenance.cache_hit=True`` (content otherwise intact)."""
-    provenance = percept.provenance.model_copy(update={"cache_hit": True})
-    return percept.model_copy(update={"provenance": provenance})
+    copied = percept.model_copy(deep=True)
+    copied.provenance.cache_hit = True
+    return copied
 
 
 def _cache_key(
@@ -395,9 +396,9 @@ class PipelineRunner:
     # -- one tool --------------------------------------------------------
 
     def _tool_kind(self, name: str) -> str | None:
-        """The registry's recorded ``ToolKind`` for a loaded tool (``None`` if it never loaded)."""
+        """Read declared registry metadata even when a tool failed to load."""
         try:
-            return self.registry.entry(name).kind
+            return self.registry.entry(name).describe()["kind"]
         except UnknownTool:
             return None
 
@@ -506,11 +507,10 @@ class PipelineRunner:
 
         produced: list[Percept] = []
         if misses:
+            unique_prompts = list({prompt.model_dump_json(): prompt for _, prompt in misses}.values())
             try:
                 with self.registry.lock_for(name):  # §11.2: per-tool inference lock
-                    produced = _coerce_percepts(
-                        tool.perceive(ctx, [prompt for _, prompt in misses])
-                    )
+                    produced = _coerce_percepts(tool.perceive(ctx, unique_prompts))
             except UnsupportedPrompt as exc:
                 _add_warning(warnings, "unsupported_prompt")
                 return self._fail_percepts(
@@ -551,7 +551,7 @@ class PipelineRunner:
                 )
 
             if cache is not None:
-                for _, prompt in misses:
+                for prompt in unique_prompts:
                     group = [p for p in produced if p.provenance.prompt == prompt]
                     if group:
                         self._cache_put(cache, image_hashes, prompt, name, ctx.options, group)
@@ -570,7 +570,7 @@ class PipelineRunner:
             group = [p for p in produced if p.provenance.prompt == prompt]
             for percept in group:
                 matched.add(id(percept))
-            ordered.extend(group)
+            ordered.extend(percept.model_copy(deep=True) for percept in group)
         for percept in produced:
             if id(percept) not in matched:
                 ordered.append(percept)
@@ -611,7 +611,7 @@ class PipelineRunner:
     ) -> None:
         try:
             key = _cache_key(cache, image_hashes, prompt, tool, options)
-            cache.put(key, list(group))
+            cache.put(key, [percept.model_copy(deep=True) for percept in group])
         except Exception as exc:  # noqa: BLE001
             self._warn_cache(exc)
 
@@ -625,13 +625,10 @@ class PipelineRunner:
     # -- percept builders ------------------------------------------------
 
     def _kind_for(self, name: str) -> str:
-        try:
-            kind = self.registry.entry(name).kind
-        except UnknownTool:
-            kind = None
+        kind = self._tool_kind(name)
         if kind:
             return str(kind)
-        # The tool never loaded, so its declared kind is unknown; keep the enum valid.
+        # A plugin without declared metadata still needs a valid provenance enum.
         return "fake" if name == "fake" else "segmenter"
 
     def _provenance(

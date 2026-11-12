@@ -55,6 +55,33 @@ def test_unproject_marks_invalid_depth_as_nan_rows():
     assert np.all(np.isnan(cam))
 
 
+@pytest.mark.parametrize(
+    "intrinsics",
+    [
+        [[0, 0, 0], [0, 100, 0], [0, 0, 1]],
+        [[100, 1, 0], [0, 100, 0], [0, 0, 1]],
+        [[100, 0, 0], [0, 100, 0], [0, 0, 2]],
+    ],
+)
+def test_projection_helpers_reject_unsupported_pinhole_intrinsics(intrinsics):
+    with pytest.raises(ValueError, match="pinhole"):
+        geo.project_points([[0, 0, 1]], intrinsics)
+    with pytest.raises(ValueError, match="pinhole"):
+        geo.unproject_pixels([[0, 0]], [1], intrinsics)
+    with pytest.raises(ValueError, match="pinhole"):
+        geo.rays_from_pixels([[0, 0]], intrinsics, T_WORLD_CAM)
+
+
+@pytest.mark.parametrize("transform", [np.zeros((4, 4)), np.diag([-1.0, 1.0, 1.0, 1.0])])
+def test_world_helpers_reject_nonrigid_camera_transforms(transform):
+    with pytest.raises(ValueError, match="rigid"):
+        geo.pixel_to_world([[0, 0]], [1], K, transform)
+    with pytest.raises(ValueError, match="rigid"):
+        geo.world_to_camera([[0, 0, 1]], transform)
+    with pytest.raises(ValueError, match="rigid"):
+        geo.rays_from_pixels([[0, 0]], K, transform)
+
+
 # ---------------------------------------------------------------------------
 # S3: round trips
 # ---------------------------------------------------------------------------

@@ -84,13 +84,15 @@ class ServiceState:
     # Set once the app's lifespan starts a background warm-up; ``None`` means no lifespan ran
     # (e.g. a bare ``create_app()`` in a unit test), which /healthz reports as unknown.
     warmup: Any = None
+    pending: set[asyncio.Task[PerceiveResponse]] = field(default_factory=set)
+    closing: bool = False
 
     @property
     def uptime_s(self) -> float:
         return round(time.monotonic() - self.started_at, 3)
 
     def try_acquire(self) -> bool:
-        if self.semaphore is None:
+        if self.closing or self.semaphore is None:
             return False
         return bool(self.semaphore.acquire(blocking=False))
 
@@ -179,6 +181,17 @@ def tool_capabilities_dict(instance: Any) -> dict[str, Any] | None:
     }
 
 
+def _model_sha256(instance: Any) -> str | None:
+    """Use the tool's provenance metadata without touching the loaded model."""
+    try:
+        metadata = getattr(instance, "_model_meta", None)
+        if callable(metadata):
+            return metadata()[1]
+        return getattr(instance, "model_sha256", None) or getattr(instance, "_model_sha256", None)
+    except Exception:  # noqa: BLE001 - introspection must remain available for broken tools
+        return None
+
+
 def tool_row(entry: ToolEntry) -> dict[str, Any]:
     instance = entry.instance
     declared = entry.describe()
@@ -189,7 +202,7 @@ def tool_row(entry: ToolEntry) -> dict[str, Any]:
         "kind": declared["kind"],
         "source": entry.source,
         "capabilities": tool_capabilities_dict(instance),
-        "model_sha256": getattr(instance, "model_sha256", None),
+        "model_sha256": _model_sha256(instance),
         "loaded": instance is not None,
     }
     if entry.error:
@@ -318,9 +331,20 @@ async def perceive(request: Request, payload: PerceiveRequest) -> Response:
         int(state.config.server.request_timeout_ms), int(payload.options.timeout_ms)
     )
     timeout_s = max(timeout_ms, 1) / 1000.0
+    task = asyncio.create_task(asyncio.to_thread(state.runner.perceive, payload))
+    state.pending.add(task)
+
+    def completed(done: asyncio.Task[PerceiveResponse]) -> None:
+        state.pending.discard(done)
+        state.release()
+        metrics_mod.METRICS.add_gauge("percepta_inflight", -1)
+        if not done.cancelled():
+            done.exception()  # Retrieve failures even after the HTTP caller has left.
+
+    task.add_done_callback(completed)
     try:
         response = await asyncio.wait_for(
-            asyncio.to_thread(state.runner.perceive, payload), timeout=timeout_s
+            asyncio.shield(task), timeout=timeout_s
         )
     except asyncio.TimeoutError:
         metrics_mod.METRICS.inc("percepta_http_responses_total", {"code": "504"})
@@ -340,13 +364,6 @@ async def perceive(request: Request, payload: PerceiveRequest) -> Response:
             extra={"request_id": payload.request_id, "status": "internal"},
         )
         return error_response(500, "internal", "unexpected error while perceiving")
-    finally:
-        # The slot is released even on timeout: `asyncio.to_thread` cannot cancel the worker
-        # thread, so the tool may still finish in the background — the alternative would be a
-        # slot leaked for the process lifetime.
-        state.release()
-        metrics_mod.METRICS.add_gauge("percepta_inflight", -1)
-
     elapsed_ms = round((time.perf_counter() - started) * 1000.0, 3)
     metrics_mod.METRICS.observe_ms("percepta_request_latency_ms", elapsed_ms)
     metrics_mod.METRICS.inc("percepta_http_responses_total", {"code": "200"})

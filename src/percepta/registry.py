@@ -205,34 +205,61 @@ class ToolRegistry:
     # -- lifecycle -------------------------------------------------------
 
     def instance(self, name: str, config: dict[str, Any] | None = None) -> PerceptionTool:
-        """Return the loaded singleton for ``name``, constructing and loading on demand."""
-        entry = self.entry(name)
-        if entry.instance is not None:
-            return entry.instance
-        if entry.factory is None:
-            entry.status = "error"
-            raise ToolLoadError(f"tool {name!r} is not importable: {entry.error}")
+        """Return the loaded singleton, serializing first load with the tool's inference lock.
 
-        entry.status = "loading"
-        try:
-            tool = entry.factory() if callable(entry.factory) else entry.factory
-            if not isinstance(tool, PerceptionTool):
-                raise ToolLoadError(
-                    f"tool {name!r} does not implement PerceptionTool (got {type(tool).__name__})"
-                )
-            tool.load(dict(config or {}))
-            if getattr(tool, "name", None) != name:
-                log.warning("tool %r reports name %r", name, getattr(tool, "name", None))
-            entry.instance = tool
-            entry.config = dict(config or {})
-            entry.kind = tool.capabilities().kind
-            entry.status = "ok"
-            entry.error = None
-            return tool
-        except Exception as exc:
-            entry.status = "error"
-            entry.error = f"{type(exc).__name__}: {exc}"
-            raise ToolLoadError(f"failed to load tool {name!r}: {exc}") from exc
+        Args:
+            name: Registered tool name.
+            config: Deployment configuration used on the first load.
+
+        Returns:
+            The same loaded tool for all concurrent callers of this registry.
+
+        Raises:
+            UnknownTool: The tool is not registered.
+            ToolLoadError: Construction or loading failed.
+
+        Example:
+            >>> from percepta.tools.fake import FakeTool
+            >>> registry = ToolRegistry(discover=False)
+            >>> registry.register("fake", FakeTool)
+            >>> registry.instance("fake") is registry.instance("fake")
+            True
+        """
+        entry = self.entry(name)
+        with entry.lock:
+            if entry.instance is not None:
+                return entry.instance
+            if entry.factory is None:
+                entry.status = "error"
+                raise ToolLoadError(f"tool {name!r} is not importable: {entry.error}")
+
+            entry.status = "loading"
+            tool = None
+            try:
+                tool = entry.factory() if callable(entry.factory) else entry.factory
+                if not isinstance(tool, PerceptionTool):
+                    raise ToolLoadError(
+                        f"tool {name!r} does not implement PerceptionTool (got {type(tool).__name__})"
+                    )
+                tool.load(dict(config or {}))
+                if getattr(tool, "name", None) != name:
+                    log.warning("tool %r reports name %r", name, getattr(tool, "name", None))
+                kind = tool.capabilities().kind
+                entry.instance = tool
+                entry.config = dict(config or {})
+                entry.kind = kind
+                entry.status = "ok"
+                entry.error = None
+                return tool
+            except Exception as exc:
+                if isinstance(tool, PerceptionTool):
+                    try:
+                        tool.close()
+                    except Exception as cleanup_error:  # noqa: BLE001 - preserve the original load error
+                        log.warning("error closing failed tool %s: %s", name, cleanup_error)
+                entry.status = "error"
+                entry.error = f"{type(exc).__name__}: {exc}"
+                raise ToolLoadError(f"failed to load tool {name!r}: {exc}") from exc
 
     def capabilities(self, name: str, config: dict[str, Any] | None = None) -> ToolCapabilities:
         return self.instance(name, config).capabilities()

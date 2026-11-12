@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import urllib.error
 import urllib.request
+from http.client import HTTPException
 from typing import Any
 
 import numpy as np
@@ -53,10 +54,13 @@ class HttpBackend:
         self.token = token
         self.path = path if path.startswith("/") else f"/{path}"
         self.prepare_path = prepare_path if prepare_path.startswith("/") else f"/{prepare_path}"
+        self._failure: str | None = None
 
     # -- transport -------------------------------------------------------
 
     def _post(self, path: str, payload: bytes) -> bytes:
+        if self._failure:
+            raise BackendUnavailable(self._failure)
         url = f"{self.endpoint}{path}"
         request = urllib.request.Request(
             url,
@@ -83,6 +87,8 @@ class HttpBackend:
             ) from exc
         except TimeoutError as exc:
             raise BackendUnavailable(f"model service timed out after {self.timeout_s}s") from exc
+        except (HTTPException, OSError) as exc:
+            raise self._fail(f"model service connection failed: {exc}") from exc
 
     # -- ModelBackend ----------------------------------------------------
 
@@ -102,12 +108,28 @@ class HttpBackend:
             return np.zeros((0, 1, 1), dtype=bool), None, np.zeros(0, dtype=float)
         return response.masks, response.boxes, response.scores
 
-    @staticmethod
-    def _decode(body: bytes):
+    def _decode(self, body: bytes):
         try:
             return decode_response(body)
         except ProtocolError as exc:
-            raise BackendUnavailable(f"model service returned a malformed frame: {exc}") from exc
+            raise self._fail(f"model service returned a malformed frame: {exc}") from exc
+
+    def _fail(self, message: str) -> BackendUnavailable:
+        self._failure = message
+        return BackendUnavailable(message)
+
+    @property
+    def health_error(self) -> str | None:
+        """Report a terminal malformed-response or connection failure.
+
+        Returns:
+            Failure detail, or None before any terminal transport/protocol failure.
+
+        Example:
+            >>> HttpBackend().health_error is None
+            True
+        """
+        return self._failure
 
     @staticmethod
     def _map_error(response) -> Exception:

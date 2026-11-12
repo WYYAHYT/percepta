@@ -33,6 +33,7 @@ The geometry summarizes matched visible surfaces, not a reconstructed object's s
 from __future__ import annotations
 
 import time
+from numbers import Real
 from typing import Any
 
 import numpy as np
@@ -65,12 +66,66 @@ ERR_INVALID_ORDER = "invalid_stereo_order"
 ERR_REVERSED_ORDER = "reversed_stereo_order"
 ERR_VERTICAL_RECTIFICATION = "vertical_rectification_unsupported"
 ERR_INVALID_MASK = "invalid_stereo_mask"
+ERR_INVALID_OPTIONS = "invalid_geometry_options"
+ERR_SGBM_IMAGE_SIZE = "sgbm_image_too_small"
 
 
 class _StereoInputError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+def _numeric_option(context, key, default, *, integer=False, minimum=None, maximum=None, positive=False):
+    """Read a finite request number, rejecting booleans, strings and invalid ranges."""
+    value = context.get(key, default)
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise _StereoInputError(ERR_INVALID_OPTIONS, f"{key} must be a finite number")
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise _StereoInputError(ERR_INVALID_OPTIONS, f"{key} must be a finite number") from exc
+    if (not np.isfinite(number) or (integer and not number.is_integer())
+            or (minimum is not None and number < minimum) or (maximum is not None and number > maximum)
+            or (positive and number <= 0)):
+        raise _StereoInputError(ERR_INVALID_OPTIONS, f"{key} has an unsupported value: {value}")
+    return int(number) if integer else number
+
+
+def _sgbm_options(context: dict[str, Any]) -> tuple[int, int]:
+    """Validate the request's integer search range and normalize an even window to odd."""
+    num_disparities = _numeric_option(context, "stereo_num_disparities", 640, integer=True, minimum=16)
+    if num_disparities % 16:
+        raise _StereoInputError(ERR_INVALID_OPTIONS, "stereo_num_disparities must be a positive multiple of 16")
+    block_size = _numeric_option(context, "stereo_block_size", 5, integer=True, minimum=1)
+    return num_disparities, block_size + (block_size % 2 == 0)
+
+
+def _sgbm_search_range(num_disparities: int, block_size: int, image_shape: tuple[int, int]) -> int:
+    """Clamp disparity to a legal 16-pixel range before OpenCV can allocate matcher buffers."""
+    height, width = image_shape
+    width_limit = 16 * ((width - 1) // 16)
+    if width_limit < 16:
+        raise _StereoInputError(ERR_SGBM_IMAGE_SIZE, "SGBM requires an image width greater than 16 pixels")
+    if block_size > min(height, width):
+        raise _StereoInputError(ERR_INVALID_OPTIONS, "stereo_block_size must fit within both image dimensions")
+    return min(num_disparities, width_limit)
+
+
+def _depth_sigma(depth: np.ndarray, focal: float, baseline: float, sigma_d: float) -> np.ndarray:
+    """Return finite assumed rectified-Z noise in metres, sigma_Z = Z² sigma_d / (f B)."""
+    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+        sigma = depth * (depth / (focal * baseline)) * sigma_d
+    if not np.isfinite(sigma).all():
+        raise _StereoInputError(ERR_INVALID_OPTIONS, "stereo_sigma_d_px produces non-finite depth uncertainty")
+    return sigma
+
+
+def _median_sigma(sigma: np.ndarray) -> float:
+    """Median of nonempty finite nonnegative metre errors, without a two-value sum overflow."""
+    lower, upper = (sigma.size - 1) // 2, sigma.size // 2
+    low, high = np.partition(sigma, (lower, upper))[[lower, upper]]
+    return float(low) + (float(high) - float(low)) * 0.5
 
 
 def _error_percept(
@@ -151,7 +206,10 @@ def _sgbm_disparity(
         disp12MaxDiff=1,
         mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY,
     )
-    raw = matcher.compute(grey_l, grey_r)
+    try:
+        raw = matcher.compute(grey_l, grey_r)
+    except cv2.error as exc:
+        raise _StereoInputError(ERR_INVALID_OPTIONS, f"unsupported SGBM image or matcher parameters: {exc}") from exc
     disparity = raw.astype(np.float32) / 16.0  # the fixed-point path scales by 16
     return disparity, disparity > 0.0
 
@@ -354,12 +412,12 @@ class Stereo3DTool(BaseTool):
     * ``stereo_backend`` -- ``"sgbm"`` (default), deployed ``"foundation_stereo"``, or ``"ffs"``.
     * ``stereo_num_disparities`` -- search range, multiple of 16. It must cover ``f*B/Z`` for the
       nearest distance of interest: about 400 px at 0.6 m on RoboDojo's rig.
-    * ``stereo_block_size`` -- matcher window; forced odd.
+    * ``stereo_block_size`` -- positive integer matcher window; forced odd and must fit the images.
     * ``stereo_mask`` -- optional ``{camera: bool array}``; only the selected left camera's mask
       is consumed. It must match the raw image size and is rectified with nearest-neighbour
       sampling before limiting the visible-surface points. Right masks are not used.
-    * ``stereo_sigma_d_px`` -- assumed disparity noise, default 1.0.
-    * ``min_valid_fraction`` -- below this the tool reports ``low_valid_fraction`` rather than a
+    * ``stereo_sigma_d_px`` -- finite, strictly positive assumed disparity noise, default 1.0.
+    * ``min_valid_fraction`` -- finite number in [0,1]; below it the tool reports ``low_valid_fraction`` rather than a
       confident-looking geometry built on almost no points.
     """
 
@@ -533,6 +591,11 @@ class Stereo3DTool(BaseTool):
                 "stereo image sizes must agree",
             )
         try:
+            sigma_d = _numeric_option(context, "stereo_sigma_d_px", 1.0, positive=True)
+            min_valid = _numeric_option(context, "min_valid_fraction", 0.01, minimum=0, maximum=1)
+            if backend == "sgbm":
+                num_disparities, block_size = _sgbm_options(context)
+                num_disparities = _sgbm_search_range(num_disparities, block_size, image_l.shape[:2])
             K_rect, _R_a, info = _rectify(cal_l, cal_r, image_l.shape[:2])
             masks = context.get("stereo_mask")
             if masks is not None and not isinstance(masks, dict):
@@ -559,22 +622,12 @@ class Stereo3DTool(BaseTool):
                 "model_config_sha256": self._config_sha256,
             }
         else:
-            num_disparities = int(context.get("stereo_num_disparities", 640))
-            if num_disparities <= 0 or num_disparities % 16 != 0:
-                num_disparities = max(16, (num_disparities // 16) * 16)
-            # OpenCV needs the search window to end strictly inside the image.
-            width_limit = 16 * (int(image_l.shape[1]) // 16) - 16
-            if num_disparities > width_limit:
+            if context.get("stereo_num_disparities", 640) > num_disparities:
                 self._log(
                     ctx,
-                    f"stereo_num_disparities {num_disparities} exceeds the image width "
-                    f"{image_l.shape[1]}; clamping to {width_limit}",
+                    f"stereo_num_disparities exceeds the image width {image_l.shape[1]}; clamping to {num_disparities}",
                     level="warning",
                 )
-                num_disparities = max(16, width_limit)
-            block_size = int(context.get("stereo_block_size", 5))
-            if block_size % 2 == 0:
-                block_size += 1
             need_06 = focal * baseline / 0.6
             if num_disparities < need_06:
                 self._log(
@@ -583,13 +636,15 @@ class Stereo3DTool(BaseTool):
                     "pair needs at 0.6 m; near objects will not match",
                     level="warning",
                 )
-            disparity, valid = _sgbm_disparity(
-                rect_l, rect_r, num_disparities=num_disparities, block_size=block_size
-            )
+            try:
+                disparity, valid = _sgbm_disparity(
+                    rect_l, rect_r, num_disparities=num_disparities, block_size=block_size
+                )
+            except _StereoInputError as exc:
+                return _error_percept(self, ctx, started, exc.code, str(exc))
             backend_details = {"num_disparities": num_disparities, "block_size": block_size}
         world, dist, valid = _disparity_points(disparity, valid, cal_l, cal_r, K_rect, info, mask)
         valid_fraction = float(valid.mean())
-        min_valid = float(context.get("min_valid_fraction", 0.01))
         if dist.size == 0 or valid_fraction < min_valid:
             self._log(
                 ctx,
@@ -609,9 +664,11 @@ class Stereo3DTool(BaseTool):
         yaw = float(geo.yaw_from_points(world[:, :2]))
 
         # sigma_d is assumed disparity noise, not measured model accuracy.
-        sigma_d = float(context.get("stereo_sigma_d_px", 1.0))
-        sigma_z = dist * dist / (focal * baseline) * sigma_d
-        height_unc = float(np.median(sigma_z))
+        try:
+            sigma_z = _depth_sigma(dist, focal, baseline, sigma_d)
+        except _StereoInputError as exc:
+            return _error_percept(self, ctx, started, exc.code, str(exc))
+        height_unc = _median_sigma(sigma_z)
 
         geometry = Geometry(
             frame="world",
@@ -653,7 +710,7 @@ class Stereo3DTool(BaseTool):
             "valid_fraction": valid_fraction,
             "points": int(dist.size),
             "median_depth_m": float(np.median(dist)),
-            "median_sigma_z_m": float(np.median(sigma_z)),
+            "median_sigma_z_m": height_unc,
             "disparity_p02": float(np.percentile(disparity[valid], 2)),
             "disparity_p98": float(np.percentile(disparity[valid], 98)),
             "warnings": [],
@@ -662,7 +719,7 @@ class Stereo3DTool(BaseTool):
         self._log(
             ctx,
             f"stereo_3d {left_name}->{right_name}: {dist.size} pts, {valid_fraction * 100:.1f}% valid, depth {float(np.median(dist)):.3f} m, "
-            f"sigma_z {float(np.median(sigma_z)) * 1000.0:.1f} mm, {(time.perf_counter() - started) * 1000.0:.1f} ms",
+            f"sigma_z {height_unc * 1000.0:.1f} mm, {(time.perf_counter() - started) * 1000.0:.1f} ms",
             level="debug",
         )
 

@@ -8,6 +8,22 @@ changed. Every design decision referenced as `D<n>` lives in [`docs/decisions.md
 
 ## Unreleased
 
+### Audit fixes — 2026-11-12
+
+* Isolate SAM3 image state per request and text/box state per prompt; enforce worker startup
+  and full RPC deadlines, strict frame validation and terminal cleanup (D40).
+* Keep HTTP admission and inflight accounting until real inference finishes, serialize
+  singleton loading, close failed instances, and preserve failed geometry-stage classification.
+* Validate physical calibration, geometry numeric options and SGBM image dimensions; require
+  world geometry for lift verification and report triview participation consistently (D41).
+* Isolate cached response objects, restore duplicate prompts linearly, bound SDK readiness IO,
+  close replaced local runners, return CLI failure codes and report model health/hash correctly (D42).
+* Apply Options filtering as defaults while preserving explicitly provided Prompt values,
+  including explicit `0.2` and `1`, as confirmed by the user (D43).
+* Preserve the `a761656` audit baseline, original behavior and red/green regression evidence
+  in [`docs/documentation-changes.md`](docs/documentation-changes.md). Package/schema/protocol
+  versions and default dependencies are unchanged.
+
 ### Documentation — 2026-11-12
 
 * Align the specification, README, deployment notes, configuration guidance and source

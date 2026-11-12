@@ -123,6 +123,17 @@ def test_mismatched_geometry_frames_do_not_pretend_to_lift():
 
     assert result.checks["lifted"] is False
     assert result.details["frame_mismatch"] == 1.0
+
+
+@pytest.mark.parametrize("frame", ["camera", "pixel"])
+def test_matching_non_world_frames_do_not_count_as_metric_lift(frame):
+    before = _percept(None, z=1.0, frame=frame)
+    after = _percept(None, z=1.2, frame=frame)
+    result = compare(before, after, {}, {"required": ["lifted"]})
+    assert result.ok is False
+    assert result.checks["lifted"] is False
+    assert result.details["world_frame_required"] == 1.0
+    assert "lift_m" not in result.details
     assert "lift_m" not in result.details
 
 

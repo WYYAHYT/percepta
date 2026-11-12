@@ -199,6 +199,24 @@ def test_coarse_step_does_not_collapse_the_search():
     assert fused.extras.get("prism_scanned_heights", MIN_PRISM_STEPS) >= MIN_PRISM_STEPS
 
 
+@pytest.mark.parametrize("options", [{"prism_step_m": 1e-320}, {"prism_max_height_m": 1e308}])
+def test_height_hypotheses_are_capped_before_integer_conversion(options, monkeypatch):
+    from percepta import fusion
+
+    calibrations, _, masks, _ = _views((0, 120, 240), 0.10)
+    sampled = []
+
+    def capture_heights(grid, views, table_z, heights):
+        sampled.extend(heights)
+        return [(min(heights, key=lambda height: abs(height - 0.10)), 1.0)]
+
+    monkeypatch.setattr(fusion, "_height_curve_grid", capture_heights)
+    result = fuse(mask_percepts(calibrations, masks), calibrations, {"table_z": 0.0, **options})
+    assert result is not None
+    assert len(sampled) == fusion.MAX_PRISM_HYPOTHESES
+    assert np.isfinite(sampled).all()
+
+
 # ---------------------------------------------------------------------------
 # P1: the split uncertainty
 # ---------------------------------------------------------------------------

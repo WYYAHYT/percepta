@@ -708,3 +708,80 @@ and the resulting estimate. The uncertainty formula remains a heuristic, not a c
 Regression checks cover actual camera rays, world-to-grid rasterization, and the public
 `fuse()` path under common world translations. The dated before/after record and results are
 in [the modification log](documentation-changes.md).
+
+## D40 — Isolate model state and account for actual worker lifetime
+
+*Date:* 2026-11-12. *Before-fix baseline:* `a761656`; audit items 1–9 and the worker-health
+part of item 18. This extends the earlier SAM3/state and error decisions without changing schemas.
+
+SAM3 prepares every camera image once per perceive call; an ndarray identity is not a content
+cache. Independent prompts call the official in-place `reset_all_prompts`, retaining image
+features while clearing language, geometric prompts and prior predictions. BackendUnavailable
+during preparation maps to tool unavailability just like the same exception during inference.
+
+The registry holds its existing per-tool RLock across first construction/load and publishes
+only after capabilities succeed. Failed instances are closed best-effort without hiding the
+original load error. Even failed geometry tools retain declared kind, so no extra mask fusion
+is invoked after their failure.
+
+SAM3 subprocess startup and each complete write/read RPC have real monotonic deadlines.
+Transport failures, timeouts, EOF and malformed frames are terminal and reap the worker;
+`ready` is accepted only at startup. Protocol v1 bytes do not change, but status, fields,
+array shape/content and exact frame consumption are checked. Healthy request-level errors
+remain reusable. A nonblocking failure snapshot makes idle worker exits visible in health.
+
+HTTP timeouts/cancellation shield the actual task and retain admission/inflight until it
+finishes; callbacks collect detached exceptions and release exactly once. Shutdown stops new
+admission, drains requests and warmup, then closes tools. Native inference threads cannot be
+forcibly interrupted; their slot remains occupied, rather than pretending they stopped.
+
+## D41 — Validate physical calibration and numerical geometry boundaries
+
+*Date:* 2026-11-12. Audit items 6, 12–14 and 20.
+
+A NumPy-only helper validates positive-focal zero-skew pinhole K and proper rigid camera-to-world
+T. Schemas and direct geometry use it; requests reject invalid matrices instead of generating
+confident zero geometry. Rotation checks tolerate absolute error `1e-6`, homogeneous rows/skew
+use `1e-8`. No model, PIL or service import enters the slim schema boundary.
+
+Numeric geometry options are parsed and checked before inference. Sigma is finite and strictly
+positive, fractions are in `[0,1]`, pair counts are `1..3`, and integer parameters reject bools,
+strings and fractional values. Existing valid search-range clamps and even-to-odd block-size
+normalization remain. Images without a valid 16-multiple SGBM search window return structured
+invalid_request. Height candidates are capped before float-to-int conversion. Triview weights
+are normalized by relative sigma to avoid intermediate overflow; even-count sigma medians use
+`low + (high-low)*0.5` to avoid adding two huge finite values while preserving tiny equal values.
+The two-view flag uses actual camera participation. Lift verification requires world-frame Z in metres.
+
+## D42 — Keep outputs and SDK resources independent across calls
+
+*Date:* 2026-11-12. Audit items 10–11 and 15–18.
+
+The pipeline deep-copies cached Percepts at both boundaries; generic PerceptCache identity
+semantics stay intact. Equivalent prompts share inference, then results are copied back in
+original prompt order and count, avoiding quadratic duplication and shared mutable observations.
+
+SDK readiness carries one monotonic deadline through polling, retries, backoff and controlled
+HTTP status/header/body reads, and rejects late success. A per-request standard urllib opener
+bounds line/chunk reads, including error bodies and chunk framing; redirected connections get
+the remaining budget. Ordinary client calls retain normal urlopen behavior. Socket timeouts
+become PerceptaError. OS DNS, underlying synchronous connection/TLS establishment or a caller's
+custom blocking health override cannot be forcibly interrupted; this is not a hard cancellation
+guarantee for every possible transport stage.
+
+Replacing a local runner closes the old one before loading its replacement. CLI perceive
+returns 1 for unavailable/invalid_request/timeout and 0 for ordinary not_found. Tool info reads
+the same model hash source as provenance, while backend failure snapshots supply live health.
+
+## D43 — Options are defaults; explicit Prompt fields take precedence
+
+*Date:* 2026-11-12. Audit item 19. **The user explicitly selected this rule.**
+
+During PerceiveRequest validation, copy each Prompt and fill only absent `min_score` / `top_k`
+from Options. Use Pydantic's explicitly-set field tracking, not equality with default values:
+explicit `0.2` or `1` also wins. Options enforce score `[0,1]` and top_k `>=1`.
+
+Resolution happens before SDK JSON serialization so HTTP revalidation sees the same effective
+values. The caller's Prompt remains unchanged; inference, cache keys and provenance consume
+the resolved Prompt. This preserves existing per-prompt settings while making global defaults
+functional, without new fields or changing `percepta/v1`.

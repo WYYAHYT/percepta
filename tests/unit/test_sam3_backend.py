@@ -8,14 +8,17 @@ reuse rule, score/top-k filtering, provenance, and the "unavailable, not not_fou
 from __future__ import annotations
 
 import sys
+from contextlib import nullcontext
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
+from percepta.backends import BackendUnavailable
 from percepta.masks import to_array
 from percepta.schema import PerceiveOptions, Prompt, ToolCapabilities, ToolContext
 from percepta.tools.base import ToolUnavailable
-from percepta.tools.sam3 import Sam3Tool
+from percepta.tools.sam3 import Sam3Tool, _Sam3Backend
 
 
 class FakeBackend:
@@ -121,6 +124,82 @@ def test_set_image_is_reused_across_prompts(tool):
     backend = FakeBackend.instances[0]
     assert backend.set_image_calls == 1  # §appendix C: set_image once, reuse the state
     assert len(backend.prompts) == 2
+
+
+def test_reused_image_buffer_is_prepared_again_for_the_next_request():
+    class SnapshotBackend(FakeBackend):
+        def set_image(self, image):
+            super().set_image(image)
+            self.snapshot = image.copy()
+
+        def segment(self, prompt):
+            mask = self.snapshot[:, :, 0] > 0
+            return mask[None], None, np.array([0.9])
+
+    instance = Sam3Tool(backend_factory=SnapshotBackend)
+    instance.load({"checkpoint": "/fake/sam3.pt"})
+    image = np.zeros((80, 100, 3), dtype=np.uint8)
+    ctx = _ctx(image, cache=False)
+    prompt = Prompt(type="text", text="red block")
+    try:
+        assert instance.perceive(ctx, [prompt])[0].status == "not_found"
+        image[10:30, 10:30] = [255, 0, 0]
+        result = instance.perceive(ctx, [prompt])[0]
+        assert result.status == "ok"
+        assert result.observations[0].area_px == 400
+        assert instance._backend.set_image_calls == 2
+    finally:
+        instance.close()
+
+
+@pytest.mark.parametrize("sequence", [("box", "box", "text"), ("text", "box")])
+def test_backend_resets_each_prompt_without_discarding_image_features(sequence):
+    image_features = object()
+    snapshots = []
+
+    class Processor:
+        def reset_all_prompts(self, state):
+            state["backbone_out"].pop("language_features", None)
+            for key in ("geometric_prompt", "masks", "boxes", "scores"):
+                state.pop(key, None)
+
+        def predict(self, state):
+            assert state["backbone_out"]["image_features"] is image_features
+            snapshots.append((state["backbone_out"].get("language_features"), len(state.get("geometric_prompt", []))))
+            state.update(masks=np.ones((1, 1, 4, 4), dtype=bool), boxes=None, scores=np.array([0.9]))
+            return state
+
+        def set_text_prompt(self, prompt, state):
+            state["backbone_out"]["language_features"] = prompt
+            return self.predict(state)
+
+        def add_geometric_prompt(self, box, label, state):
+            state.setdefault("geometric_prompt", []).append((box, label))
+            return self.predict(state)
+
+    backend = _Sam3Backend.__new__(_Sam3Backend)
+    backend._torch = SimpleNamespace(inference_mode=nullcontext)
+    backend.processor = Processor()
+    backend._state = {"backbone_out": {"image_features": image_features}}
+    backend._supports_geometric = True
+    for kind in sequence:
+        prompt = Prompt(type="text", text="cup") if kind == "text" else Prompt(type="box", box=[0.5, 0.5, 0.2, 0.2])
+        backend.segment(prompt)
+    assert snapshots == [("cup", 0) if kind == "text" else (None, 1) for kind in sequence]
+
+
+def test_prepare_failure_is_a_tool_unavailable_error():
+    class UnavailableBackend(FakeBackend):
+        def set_image(self, image):
+            raise BackendUnavailable("prepare timed out")
+
+    instance = Sam3Tool(backend_factory=UnavailableBackend)
+    instance.load({"checkpoint": "/fake/sam3.pt"})
+    try:
+        with pytest.raises(ToolUnavailable, match="prepare timed out"):
+            instance.perceive(_ctx(), [Prompt(type="text", text="cup")])
+    finally:
+        instance.close()
 
 
 def test_all_scores_below_threshold_is_not_found_not_unavailable(tool):

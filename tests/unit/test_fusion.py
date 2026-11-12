@@ -87,6 +87,22 @@ def test_single_view_with_depth_is_a_valid_one_view_geometry():
     assert fused.geometry.top_z == pytest.approx(0.10, abs=0.01)
 
 
+@pytest.mark.parametrize(
+    "field,value,error",
+    [
+        ("T_world_cam", np.zeros((4, 4)).tolist(), "rigid"),
+        ("K", [[0, 0, 0], [0, 0, 0], [0, 0, 1]], "pinhole"),
+    ],
+)
+def test_direct_fuse_revalidates_calibration_that_bypassed_schema(field, value, error):
+    calibrations, _, _, percepts, _ = _scene(with_depth=True)
+    camera = sorted(calibrations)[0]
+    # model_copy and mutable fields can bypass Pydantic construction-time validation.
+    calibrations[camera] = calibrations[camera].model_copy(update={field: value})
+    with pytest.raises(ValueError, match=error):
+        fuse(percepts, calibrations, {"table_z": 0.0})
+
+
 # ---------------------------------------------------------------------------
 # §9.2 / D4 prism (silhouette) path
 # ---------------------------------------------------------------------------

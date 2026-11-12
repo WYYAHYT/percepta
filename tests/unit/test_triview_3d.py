@@ -98,6 +98,79 @@ def _three_view_scene():
     return images, cal
 
 
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"stereo_sigma_d_px": -1}, {"stereo_sigma_d_px": 0}, {"stereo_sigma_d_px": "nan"},
+        {"stereo_sigma_d_px": True}, {"min_valid_fraction": -0.1}, {"min_valid_fraction": 1.1},
+        {"stereo_num_disparities": 17}, {"stereo_num_disparities": "256"}, {"stereo_block_size": -3},
+        {"stereo_block_size": 10_000}, {"triview_max_pairs": 0}, {"triview_max_pairs": 4},
+        {"triview_max_pairs": 2.5}, {"triview_max_pairs": True},
+    ],
+)
+def test_invalid_numeric_options_are_rejected_before_pair_matching(options, monkeypatch):
+    images, calibration = _three_view_scene()
+    monkeypatch.setattr(triview, "_pair_points", lambda *a, **kw: pytest.fail("invalid options reached pair matcher"))
+    result = Triview3DTool().perceive(_context(images, calibration, **options), [])
+    assert result and result[0].status == "invalid_request"
+    assert result[0].extras["code"] == "invalid_geometry_options"
+
+
+def test_triview_rejects_images_without_a_legal_sgbm_range(monkeypatch):
+    _, calibration = _three_view_scene()
+    images = {name: np.zeros((24, 8, 3), np.uint8) for name in calibration}
+    calibration = {
+        name: cal.model_copy(update={"width": 8, "height": 24, "K": [[50, 0, 4], [0, 50, 12], [0, 0, 1]]})
+        for name, cal in calibration.items()
+    }
+    monkeypatch.setattr(triview, "_pair_points", lambda *a, **kw: pytest.fail("unsupported image reached pair matcher"))
+    result = Triview3DTool().perceive(_context(images, calibration), [])
+    assert result and result[0].status == "invalid_request"
+    assert result[0].extras["code"] == "sgbm_image_too_small"
+
+
+def test_inverse_variance_centroid_survives_a_large_finite_noise_scale():
+    images, calibration = _three_view_scene()
+    tool = Triview3DTool()
+    normal = tool.perceive(_context(images, calibration, stereo_num_disparities=256), [])[0]
+    large = tool.perceive(_context(images, calibration, stereo_num_disparities=256, stereo_sigma_d_px=1e200), [])[0]
+    assert normal.status == large.status == "ok"
+    np.testing.assert_allclose(large.geometry.centroid, normal.geometry.centroid, atol=1e-10)
+    assert np.isfinite(large.geometry.uncertainty_m)
+    assert large.geometry.uncertainty_m == pytest.approx(normal.geometry.uncertainty_m * 1e200)
+
+
+def test_per_pair_sigma_medians_remain_finite(monkeypatch):
+    images, calibration = _three_view_scene()
+    disparity = np.full((HEIGHT, WIDTH), np.sqrt(FOCAL * 0.6))
+    monkeypatch.setattr(triview, "_sgbm_disparity", lambda *a, **kw: (disparity, np.ones(disparity.shape, bool)))
+    result = Triview3DTool().perceive(_context(images, calibration, stereo_sigma_d_px=1e308), [])[0]
+    assert result.status == "ok"
+    assert np.isfinite(result.geometry.uncertainty_m)
+    assert all(np.isfinite(pair["median_sigma_z_m"]) for pair in result.extras["per_pair"])
+
+
+def test_nonfinite_computed_uncertainty_is_an_invalid_request(monkeypatch):
+    images, calibration = _three_view_scene()
+    monkeypatch.setattr(
+        triview, "_sgbm_disparity", lambda a, b, **kw: (np.full(a.shape[:2], 0.0625), np.ones(a.shape[:2], bool))
+    )
+    result = Triview3DTool().perceive(_context(images, calibration, stereo_sigma_d_px=1e308), [])
+    assert result and result[0].status == "invalid_request"
+    assert result[0].extras["code"] == "invalid_geometry_options"
+
+
+def test_two_pairs_still_use_all_three_cameras():
+    images, calibration = _three_view_scene()
+    result = Triview3DTool().perceive(
+        _context(images, calibration, stereo_num_disparities=256, triview_max_pairs=2), []
+    )[0]
+    assert result.geometry.views_used == 3
+    assert result.extras["pairs_used"] == 2
+    assert result.extras["degraded_to_two_view"] is False
+    assert "triview_degraded_to_subset_of_pairs" in result.extras["warnings"]
+
+
 # ---------------------------------------------------------------------------
 # The fusion itself
 # ---------------------------------------------------------------------------
@@ -306,8 +379,9 @@ def test_reversed_pairs_are_reported_not_automatically_swapped():
 
 def test_malformed_calibration_is_not_hidden_by_other_pairs():
     images, cal = _three_view_scene()
+    ctx = _context(images, cal)
     cal["cam2"].K[0][0] = 0
-    p = Triview3DTool().perceive(_context(images, cal), [])[0]
+    p = Triview3DTool().perceive(ctx, [])[0]
     assert p.status == "invalid_request" and p.geometry is None
     assert p.extras["code"] == "invalid_calibration"
 

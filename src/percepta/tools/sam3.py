@@ -14,7 +14,8 @@ Two properties matter here:
 Upstream shape, per appendix C: call ``build_sam3_image_model`` with keyword arguments
 ``bpe_path``, ``device``, ``checkpoint_path``, ``load_from_HF=False`` and
 ``enable_inst_interactivity=True``; construct ``Sam3Processor(model, resolution=1008,
-device=device)``. Pass a PIL image to ``set_image`` and reuse its state for ``set_text_prompt`` /
+device=device)``. Prepare each request's image once with ``set_image``, retain its image
+features, and reset prompts before each independent ``set_text_prompt`` /
 ``add_geometric_prompt(box=[cx, cy, w, h])``; outputs are ``masks (N,1,H,W) bool`` at the
 original resolution plus ``boxes`` (xyxy) and ``scores``. If the upstream API moves, only
 this file changes — that is exactly why the spec forbids leaking it into the schema.
@@ -200,6 +201,8 @@ class _Sam3Backend:
             raise Sam3BackendError("set_image() must be called before segment()")
 
         with torch.inference_mode():
+            # Independent prompts share image features, never earlier text/boxes or predictions.
+            self.processor.reset_all_prompts(self._state)
             if prompt.type == "text":
                 # Verified signature: set_text_prompt(self, prompt: str, state: Dict)
                 self._state = self.processor.set_text_prompt(
@@ -255,7 +258,6 @@ class Sam3Tool(BaseTool):
         self._backend_factory = backend_factory
         self._backend: Any = None
         self._lock = threading.Lock()
-        self._image_key: tuple[str, int] | None = None
         self._warned: set[str] = set()
 
     def capabilities(self) -> ToolCapabilities:
@@ -282,7 +284,6 @@ class Sam3Tool(BaseTool):
                 device=config.get("device") or "cpu",
                 resolution=int(config.get("resolution", 1008)),
             )
-            self._image_key = None
             return
 
         kind = resolve_backend_kind(config)
@@ -363,7 +364,6 @@ class Sam3Tool(BaseTool):
         else:  # pragma: no cover - resolve_backend_kind already validated
             raise ToolUnavailable(f"unsupported backend {kind!r}")
 
-        self._image_key = None
         # NOTE: there used to be a ``warmup`` flag here that ran a 32x32 all-zero frame. It was
         # worse than useless: a tiny black image exercises different kernel shapes than a real
         # frame (so the expensive autotuning still happened on the first real request), it
@@ -388,7 +388,6 @@ class Sam3Tool(BaseTool):
                     self._backend.close()
                 finally:
                     self._backend = None
-            self._image_key = None
             self._loaded = False
 
     # -- inference -------------------------------------------------------
@@ -422,17 +421,14 @@ class Sam3Tool(BaseTool):
             for camera in sorted(ctx.images):
                 image = ctx.images[camera]
                 started = time.perf_counter()
-                self._set_image_once(camera, image)
+                # Array identities can be reused or mutated across requests; prepare every frame.
+                try:
+                    self._backend.set_image(image)
+                except BackendUnavailable as exc:
+                    raise ToolUnavailable(str(exc)) from exc
                 for prompt in prompts:
                     percepts.append(self._perceive_one(ctx, camera, prompt, started))
         return percepts
-
-    def _set_image_once(self, camera: str, image: np.ndarray) -> None:
-        """``set_image`` is the expensive call: reuse the state for every prompt (§appendix C)."""
-        key = (camera, int(hash(image.tobytes())) if image.size < 4096 else id(image))
-        if self._image_key != key:
-            self._backend.set_image(image)
-            self._image_key = key
 
     def _perceive_one(
         self, ctx: ToolContext, camera: str, prompt: Prompt, started_at: float

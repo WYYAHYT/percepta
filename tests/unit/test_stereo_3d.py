@@ -105,6 +105,67 @@ def _pair(plane_y: float = 1.0, baseline: float = 0.6):
     return left, right, cal
 
 
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"stereo_sigma_d_px": -1}, {"stereo_sigma_d_px": 0}, {"stereo_sigma_d_px": "nan"},
+        {"stereo_sigma_d_px": True}, {"min_valid_fraction": -0.1}, {"min_valid_fraction": 1.1},
+        {"min_valid_fraction": None}, {"stereo_num_disparities": 0}, {"stereo_num_disparities": 17},
+        {"stereo_num_disparities": "256"}, {"stereo_num_disparities": 256.5},
+        {"stereo_block_size": -3}, {"stereo_block_size": 10_000}, {"stereo_block_size": True},
+    ],
+)
+def test_invalid_numeric_options_are_rejected_before_matching(options, monkeypatch):
+    left, right, calibration = _pair()
+    monkeypatch.setattr(stereo, "_sgbm_disparity", lambda *a, **kw: pytest.fail("invalid options reached matcher"))
+    result = Stereo3DTool().perceive(_context({"left": left, "right": right}, calibration, **options), [])
+    _assert_invalid(result, "invalid_geometry_options")
+
+
+@pytest.mark.parametrize("width", [1, 8, 16])
+def test_sgbm_rejects_images_without_a_legal_disparity_range(width, monkeypatch):
+    _, _, calibration = _pair()
+    images = {name: np.zeros((24, width, 3), np.uint8) for name in calibration}
+    calibration = {
+        name: cal.model_copy(update={"width": width, "height": 24, "K": [[50, 0, width / 2], [0, 50, 12], [0, 0, 1]]})
+        for name, cal in calibration.items()
+    }
+    monkeypatch.setattr(stereo, "_sgbm_disparity", lambda *a, **kw: pytest.fail("unsupported image reached matcher"))
+    _assert_invalid(Stereo3DTool().perceive(_context(images, calibration), []), "sgbm_image_too_small")
+
+
+def test_smallest_supported_width_preserves_legal_option_normalization(monkeypatch):
+    _, _, calibration = _pair()
+    images = {name: np.zeros((24, 17, 3), np.uint8) for name in calibration}
+    calibration = {name: cal.model_copy(update={"width": 17, "height": 24}) for name, cal in calibration.items()}
+    calls = []
+
+    def match(left, right, **options):
+        calls.append(options)
+        return np.zeros(left.shape[:2], np.float32), np.zeros(left.shape[:2], bool)
+
+    monkeypatch.setattr(stereo, "_sgbm_disparity", match)
+    result = Stereo3DTool().perceive(
+        _context(images, calibration, stereo_num_disparities=32.0, stereo_block_size=4.0, min_valid_fraction=0), []
+    )
+    assert result == []
+    assert calls == [{"num_disparities": 16, "block_size": 5}]
+
+
+def test_finite_sigma_median_does_not_overflow(monkeypatch):
+    left, right, calibration = _pair()
+    disparity = np.full(left.shape[:2], np.sqrt(FOCAL * 0.6))
+    monkeypatch.setattr(stereo, "_sgbm_disparity", lambda *a, **kw: (disparity, np.ones(disparity.shape, bool)))
+    result = Stereo3DTool().perceive(
+        _context({"left": left, "right": right}, calibration, stereo_sigma_d_px=1e308), []
+    )[0]
+    assert result.status == "ok"
+    assert np.isfinite(result.geometry.uncertainty_m)
+    assert result.geometry.uncertainty_m == pytest.approx(1e308)
+    smallest = np.nextafter(0.0, 1.0)
+    assert stereo._median_sigma(np.full(2, smallest)) == smallest
+
+
 # ---------------------------------------------------------------------------
 # The relation the tool exists to implement
 # ---------------------------------------------------------------------------
@@ -547,6 +608,7 @@ def test_extra_supplied_views_are_not_filtered_away(extra):
 )
 def test_malformed_calibrations_are_structured_errors(fault):
     left, right, cal = _pair()
+    ctx = _context({"left": left, "right": right}, cal)
     a = cal["left"]
     if fault == "zero_focal":
         a.K[0][0] = 0
@@ -573,7 +635,7 @@ def test_malformed_calibrations_are_structured_errors(fault):
     elif fault == "coincident":
         cal["right"].T_world_cam = a.T_world_cam
     _assert_invalid(
-        Stereo3DTool().perceive(_context({"left": left, "right": right}, cal), []),
+        Stereo3DTool().perceive(ctx, []),
         stereo.ERR_INVALID_CALIBRATION,
     )
 

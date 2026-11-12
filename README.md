@@ -119,6 +119,9 @@ Error mapping: `400` invalid request · `401` missing/wrong bearer · `413` body
 `max_body_bytes` · `503` queue full · `504` timeout · `500` internal.
 An unavailable model returns HTTP `200` with Percept `status="unavailable"` and `tool_unavailable` in warnings.
 **`not_found` is a Percept status, not an HTTP error** — it arrives inside a `200`.
+An HTTP timeout does not stop the inference thread: it retains its admission slot until the
+actual computation finishes, so subsequent requests can receive `503`. Shutdown waits for
+outstanding inference and warm-up before closing tools.
 
 Binding is loopback-only by default (`127.0.0.1:8790`); put an SSH tunnel in front of it
 rather than exposing it:
@@ -165,6 +168,14 @@ extra. Each other deployed model has its own `configs/local-*.yaml` and locked r
 SAM3 supports text and box prompts; the schema's point prompt is supported by `fake`, not
 the official SAM3 processor. The pairwise triview route also requires the `stereo` extra;
 the neural triview routes keep their model dependencies in their own runtimes.
+SAM3 prepares each camera frame once per request and resets text/box state for each prompt;
+image features are shared only within that request. Equal prompts can share inference while
+still producing one independent result per input occurrence.
+
+`options.min_score` and `options.top_k` supply defaults. A prompt's explicitly provided values
+take precedence, even when they equal the usual defaults (`0.2` and `1`). For example,
+`options={"top_k": 3}` applies to a prompt with no `top_k`, while an explicit `Prompt(...,
+top_k=1)` still requests one instance. SDK and HTTP resolve the same effective prompts.
 
 A tool declares `capabilities()`; the pipeline validates prompts against those *before*
 calling, so a box-only tool handed a text prompt yields a Percept with
@@ -177,6 +188,9 @@ Enabled stages run in resolved order: this is not an automatic fallback chain. `
 the extra fusion used when no geometry tool ran. The pipeline still calls explicitly selected
 geometry tools: `multi_view_3d` itself honors this flag, while `stereo_3d` and `triview_3d`
 can still populate `fused`.
+An explicitly selected geometry tool that fails to load remains a failed geometry stage;
+the pipeline does not substitute mask fusion. Cached observations are copied at both cache
+boundaries, so editing an SDK response does not alter later requests.
 
 Adding a tool: subclass `percepta.tools.base.BaseTool`, keep heavy imports inside `load()`,
 register an entry point in the `percepta.tools` group (or `percepta.tools.<name>` module).
@@ -331,6 +345,8 @@ Frozen, and the most common source of bugs:
   **exclusive**.
 * Camera frame: OpenCV (x right, y down, z forward).
 * World: right-handed metres; `T_world_cam` is **camera→world**, `p_world = T_world_cam @ p_cam_h`.
+* Calibration requires positive-focal, zero-skew pinhole intrinsics and a finite proper rigid
+  camera-to-world transform. Invalid matrices are rejected before world geometry is produced.
 * **No calibration ⇒ no `Geometry`.** Metres are never inferred from pixels alone.
 * Every geometry carries `frame="world"` and a non-null `uncertainty_m`. The current
   single-view table estimate has a height-uncertainty floor of 0.05 m; this is an assumption,
@@ -358,6 +374,9 @@ print(result.ok, result.checks)   # inspect the evidence; pixel displacement alo
 ```
 
 `followed` / `lifted` / `stable` / `visible`; a `not_found` observation never counts as a pass.
+`lifted` requires world-frame geometry: camera +Z and pixel coordinates cannot establish a
+metric vertical lift. CLI `perceive` returns exit code 1 for unavailable/invalid/timeout
+results; an ordinary `not_found` remains exit code 0.
 
 ## Repository layout
 

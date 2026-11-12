@@ -16,6 +16,7 @@ Bind address is *not* handled here: ``percepta serve`` owns the loopback-only po
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 from collections.abc import AsyncIterator
@@ -190,7 +191,12 @@ def create_app(
         try:
             yield
         finally:
-            state.runner.close()
+            state.closing = True
+            if state.pending:
+                await asyncio.shield(asyncio.gather(*state.pending, return_exceptions=True))
+            if warmup_thread is not None:
+                await asyncio.to_thread(warmup_thread.join)
+            await asyncio.to_thread(state.runner.close)
 
     app = FastAPI(
         title="percepta",

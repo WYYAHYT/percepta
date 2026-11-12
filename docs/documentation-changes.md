@@ -1,8 +1,8 @@
 # 文档修订记录
 
-> **当前状态（2026-11-12 后续修复，D39）**：`DOC-20261112-01`、`DOC-20261112-02`
-> 已完成坐标计算修复；本页第一批文档审计记录中的“尚未修复”是当时的历史状态。
-> 修改前基线 `5156672`，本次原公式、新公式、回归验证及仍保留的方法限制见页末修复记录。
+> **当前状态（2026-11-12 后续修复，D39–D43）**：`DOC-20261112-01/02` 的坐标错误，
+> 以及之后全盘审计的20组问题均已修复。本页各批次中的“尚未修复”保留当时的历史状态。
+> 坐标修复前基线为 `5156672`，20组修复前基线为 `a761656`；旧行为、新行为及验证见各批次记录。
 
 ## 2026-11-12：对齐已部署实现，保留历史原文
 
@@ -195,3 +195,94 @@ uv run --locked pytest -o addopts= tests/unit/test_fusion.py \
 hang 仍按各视角候选做并集，并使用原有 IoU 改善门限筛选；未实现旧注释中所说的
 “与 prism_cells 联合并满足全部视角约束”。本次不把这些设计意图扩成新功能，也不承诺完整对象补全。
 uncertainty 仍为启发式估计，修复距离公式不意味着完成误差标定。未运行 GPU 模型或任务精度评测。
+
+## 2026-11-12：关闭全盘审计的20组问题（D40–D43）
+
+- **修改日期**：2026-11-12，Asia/Shanghai（UTC+08:00）。
+- **记录整理时间**：2026-11-12 12:10（UTC+08:00）。
+- **最终验收整理时间**：2026-11-12 12:20（UTC+08:00）。
+- **修改前基线**：`a761656`；本表编号对应在该基线上完成的全盘审计。
+- **授权**：用户要求按照审计建议修复；第19项单独确认“Options 作默认，Prompt 显式值优先”。
+- **版本**：规格修订号 `v0.3.0-doc.3`；包 `0.3.0`、schema `percepta/v1`、模型线协议 v1 不变。
+- **范围**：修复审计中的20组运行时／接口问题，补回归与现行文档；不新增默认依赖，不改变模型资产。
+
+完整旧源码、测试及文档可从 Git 复查，例如：
+
+```bash
+git show a761656:src/percepta/tools/sam3.py
+git show a761656:src/percepta/service/routes.py
+git diff a761656 -- src/percepta tests README.md percepta-SPEC.md docs CHANGELOG.md
+```
+
+### 逐项修改前后对照
+
+下表全部已修复。“原行为”描述修复前基线，不能作为当前代码的待办清单。
+
+| 审计项 | 原代码／行为及影响 | 修复后行为与原因 |
+|---|---|---|
+| 1 · SAM3 旧图复用 | 大图 `_image_key` 使用 `id(image)`，地址复用或原地更新缓冲区后仍用旧特征；真实连续帧会误报 not_found | 删除跨调用图像身份缓存；每次 perceive 为每相机准备一次图像，同次多提示仍共享特征。完整请求命中仍由父进程 PerceptCache 跳过推理 |
+| 2 · SAM3 提示污染 | 官方 processor 的 box 提示追加、text 不清 box；box→box→text 会携带1框／2框／文本+2框 | 每次独立 segment 前执行原地 `reset_all_prompts(self._state)`，保留图像特征、清除语言／几何提示及预测；不把其 None 返回值赋给 state |
+| 3 · 通用 worker 无期限 | `timeout_s` 只保存，启动／管道写入读取可永久阻塞 | 复用已有 `_DeadlinePipe`，启动与每次完整写入+读取 RPC 各有单调时钟预算；超时清理并回收 worker，不静默重启；stderr 持续有界排空，close 的 IO 也有界 |
+| 4 · HTTP504 释放仍计算的容量 | handler finally 释放 semaphore／inflight，但 `to_thread` 线程仍执行；6个超时可留下6线程且报告0 inflight | 强引用 pending task，shield 防止 HTTP 超时／取消传播到托管任务；真正结束才由回调一次性释放容量、收集异常。shutdown 停止准入，等待请求和预热，再关闭 runner |
+| 5 · 首次加载并发／失败泄漏 | 单例检查、构造、load 没有同一锁，首次并发可加载两份模型；capabilities 失败还可能遗失已加载资源 | 用已有 entry RLock 覆盖检查至发布；capabilities 成功后才发布实例。失败尽力 close，即使 close 再报错也保留原始加载错误 |
+| 6 · 非物理标定生成伪几何 | schema 只检查形状；全零 T 能产生 ok、零坐标及0.001 m uncertainty，奇异 K 可能 HTTP500 | NumPy-only 共享验证供 schema／直接 geometry／fuse 使用：正焦距、零 skew pinhole K，有限 proper rigid T。HTTP坏矩阵在请求验证返回400；直接调用明确 ValueError。R 容差1e-6、底行／skew容差1e-8 |
+| 7 · geometry 失败后擅自融合 | 未加载 entry.kind 为 None，失败工具被视为 segmenter，继而运行未选择的 multi_view_3d | 使用 `entry.describe()` 的类声明 kind；geometry 加载失败仍属于已选择阶段，保留 unavailable，不执行补充 mask 融合 |
+| 8 · SAM3 prepare 逸出500 | prepare 位于 segment 异常映射之外，启动失败的 BackendUnavailable 直接 HTTP500 | 在每相机准备边界转换为 ToolUnavailable，进入既有 unavailable Percept 语义 |
+| 9 · 坏协议伪装为 not_found | 非法状态可解码，backend 当作空结果；完整帧尾随垃圾也被接受 | v1 解码严格检查阶段允许状态、字段／重复 JSON key、错误组合、数组形状和有限性、完整帧消费；ready 仅限启动。坏帧／EOF 为终止故障；合法请求级错误仍可复用 worker |
+| 10 · SDK 修改污染缓存 | pipeline 缓存写入和命中均浅复制，修改返回 Observation 可改变下一请求 | 在 pipeline 缓存读写边界深复制 Percept；保留通用 PerceptCache identity 契约 |
+| 11 · 重复提示 N² 输出 | 同值提示反复匹配整组，输入1／2／3次产生1／4／9条结果 | 等效提示去重推理／缓存写入，再按输入顺序和次数复制回独立结果；覆盖冷缓存、热缓存、混合及禁用缓存 |
+| 12 · 非 world Z 当抬升 | 只比较 frame 相等，camera／pixel Z变化被称作米制 lift | lifted 必须两侧 world；相同非 world 设置 `world_frame_required`，不提供 lift_m、不通过抬升；不同 frame 仍用原 frame_mismatch |
+| 13 · 无效数值／溢出 | 负 sigma 产生负 uncertainty；字符串／NaN／小数整数选项可逸出500；极小 prism step 在封顶前 int(inf)；大 sigma 权重或 median 溢出 | 推理前共享类型／有限性／范围校验，坏选项返回 invalid_request。sigma>0、fraction在[0,1]、max_pairs整数1..3；高度候选先封顶512再round/int。相对 sigma 权重避免平方溢出；拒绝计算后非有限 sigma；median 用 `low+(high-low)*0.5`，保留最小正subnormal |
+| 14 · SGBM 小图非法原生分配 | width≤16 强制16视差，OpenCV 尝试巨大分配或断言失败，HTTP500 | matcher 前确认合法16倍数搜索范围及适合的 window；不适合的小图返回 `sgbm_image_too_small`。合法大范围仍 clamp，偶数正整数 window 仍转奇数 |
+| 15 · SDK readiness 超期 | 20 ms预算可等待150 ms后还返回成功；socket TimeoutError逸出。连续慢字节的body／status／headers及chunked CRLF也可突破期限，redirect重用旧连接预算 | 一个绝对deadline贯穿重试／backoff／轮询及受控HTTP状态行／响应头／body读取；readiness专用标准urllib opener按line／chunk重设剩余socket预算，redirect连接刷新剩余期限。成功返回前拒绝超期，传输超时统一 PerceptaError。普通请求仍用原urlopen，未加线程 |
+| 16 · 替换 local runner 泄漏 | 覆盖旧 runner，close 只清理最后一个，旧模型／registry仍加载 | 先关闭旧 runner，再构造／加载替代者；覆盖共享 registry 顺序及替换失败路径 |
+| 17 · CLI 错误退出0 | perceive 返回 unavailable 仍 exit0，自动化无法识别失败 | 输出仍可检查，任一 percept／fused 为 unavailable、invalid_request、timeout 则 exit1；普通 not_found 仍 exit0 |
+| 18 · health／hash失真 | 通用 worker 退出后 registry仍ok；provenance有模型hash而 /v1/info 为null | 通用 subprocess／HTTP backend 提供不等待推理锁的 health_error；info使用 `_model_meta()` 或既有 model_sha256／_model_sha256，与来源信息一致 |
+| 19 · Options过滤未执行 | Options.min_score／top_k仅进入cache key，实际工具只使用Prompt；优先级未定义 | 用户确认 Options 只填未显式字段；以 `model_fields_set` 判断，显式0.2／1也覆盖。请求验证复制并合并，SDK序列化前完成，HTTP往返一致；Options验证score在[0,1]、top_k≥1 |
+| 20 · 三目误标为双目 | 使用两组pair／三台相机时 `degraded_to_two_view=true` | 按实际参与相机数判断双视角；未用满pair仍保留subset警告 |
+
+### 回归证据
+
+这些检查均使用现有环境；新增反例先在旧实现失败，再验证修复后的行为。
+
+- SAM3／registry首批：**5 failed → 27 passed**；非world抬升：**2 failed → green**；capabilities失败清理：**2 failed → green**。最终 registry／verification相关组 **38 passed**。
+- HTTP准入／失败geometry：7项新回归先红，相关组 **87 passed**；缓存／重复提示6项先红，相关组 **51 passed**。
+- 标定边界：**22 failed、3兼容项通过 → 25 passed**；相关9文件 **206 passed**。10项旧测试改为先创建合法 ToolContext 再突变标定，以保留原工具边界拒绝断言。
+- 数值／SGBM／相机参与：**45 failed → 45 passed**，另有兼容及median边界3项；最终相关6文件 **191 passed**。median的2项新增反例曾分别触发Geometry.inf和per_pair.inf。
+- 协议／worker／相关模型工具：**231 passed、1 deselected**；暂缓的独立临时venv安装测试已纳入最终全套。
+- Options合并：9项中7项旧实现失败、2项兼容通过，修复后全绿，相关组 **72 passed**；CLI／info：14项中10项先红、4项兼容，相关组 **42 passed**。
+- SDK生命周期／readiness：真实200及503单字节慢body，40 ms预算在旧实现耗时约278 ms；2项先红再绿。最终复核另补status／headers的200／503四项（80 ms预算旧实现耗约229／290 ms）、chunked CRLF（120 ms预算耗183 ms）、redirect剩余连接预算，共6项先红再绿；兼容读取及关闭行为一并覆盖，最终client相关组 **43 passed**。
+- 联合CPU worker／真实HTTP：请求先504、推理占位时下一请求503、worker期限回收后释放容量；随后请求HTTP200/unavailable，health显示error，shutdown后pending=0。
+- 官方SAM3 processor的CPU状态探针：forward替换为记录输入的stub，无权重推理。修复后box→box→text分别为1框、1框、文本+0框，text→box不携带旧文本；确认reset保留图像特征且原地返回None。
+
+最终整体验收结果见本节末尾；分组计数有重叠，不能相加成全套通过数。
+
+### 文档对齐与保留边界
+
+README、规格主本／镜像、部署说明、D40–D43与CHANGELOG同步现行语义；本记录保留旧代码位置、
+公式及错误后果。既有D1–D39和上一批审计原文保留，根规格与docs镜像必须逐字相同。
+
+HTTP504仍不能强制终止原生推理线程；容量保留到实际结束，shutdown也会等待。独立worker的期限
+分别用于启动和每次完整RPC，首次准备可能使用两段预算。SDK可以限制受控HTTP读取，但同步API
+不能强制中断OS DNS、底层连接／TLS建立或调用方自定义的阻塞health()；不承诺任意传输阶段均可硬取消。
+非法／不支持的标定与请求参数现在会被明确拒绝。
+
+本批未运行GPU forward、任务精度评估、长时间负载或跨机部署；没有更换权重、下载模型、推送或发布。
+辅助／插件API的3个较低优先边界（超大直接fuse mask分配、PlaneGrid整数索引helper、极端长宽比grid上限）
+仍未纳入本批20项修复；模型部署的既有证据与方法限制仍以model-isolation及D35–D39为准。
+
+### 最终验收
+
+在median边界及SDK状态行／headers／chunk framing／redirect修复冻结后执行：
+
+- `uv run --locked pytest -o addopts= -q`：**903 passed、9 skipped**，72.33 s；包含已安装 OpenCV 5.0.0 的几何回归。有1条既有 Starlette/httpx 弃用警告；跳过项未计入通过。
+- `uv run --locked ruff check .`：通过；`git diff --check`：通过。
+- `uv run --locked python scripts/e2e_smoke.py`：**E2E OK**；真实 uvicorn 下的 HTTP／进程内结果一致，not_found 仍 HTTP200。
+- 共享标定、registry和通用协议的 **11项doctest通过**。
+- `uv run --locked python scripts/check_lock_portability.py`：6份锁文件均使用官方域名；根项目和5个模型项目的 `uv lock --check` 均通过，依赖和锁文件未修改。
+- 规格主本与镜像逐字一致，15个文档模型字段集合与实际schema一致；本次涉及的7份文档中11个唯一Markdown本地链接目标存在；README／规格的13个Python、1个JSON代码块语法通过。
+
+中间两轮全套分别为895／897 passed、9 skipped；后者已含2项median回归。之后又补6项SDK读取回归，
+最终结果以本节最终验收数为准。
+分组结果只用于展示具体覆盖，不替代本轮完整回归。所有修改保存在本地Git提交，未推送／发布；
+原有 `.qoder/` 本机配置不纳入提交。

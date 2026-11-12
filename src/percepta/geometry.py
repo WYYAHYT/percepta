@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from ._calibration import pinhole_intrinsics, rigid_transform
+
 __all__ = [
     "project_points",
     "unproject_pixels",
@@ -51,23 +53,13 @@ _PLANE_EPS = 1e-12
 
 
 def _intrinsics(K) -> np.ndarray:
-    """Return ``K`` as a validated ``(3, 3)`` float64 camera matrix."""
-    k = np.asarray(K, dtype=np.float64)
-    if k.shape != (3, 3):
-        raise ValueError(f"K must be 3x3 intrinsics, got shape {k.shape}")
-    if not np.all(np.isfinite(k)):
-        raise ValueError("K contains non-finite values")
-    return k
+    """Return validated float64 zero-skew pinhole intrinsics in pixel units."""
+    return pinhole_intrinsics(K)
 
 
 def _transform(T) -> np.ndarray:
     """Return ``T`` as a validated ``(4, 4)`` float64 rigid transform."""
-    t = np.asarray(T, dtype=np.float64)
-    if t.shape != (4, 4):
-        raise ValueError(f"T_world_cam must be 4x4, got shape {t.shape}")
-    if not np.all(np.isfinite(t)):
-        raise ValueError("T_world_cam contains non-finite values")
-    return t
+    return rigid_transform(T)
 
 
 def _pixels(uv) -> np.ndarray:

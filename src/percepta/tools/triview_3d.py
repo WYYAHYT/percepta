@@ -54,11 +54,17 @@ from ..weights import WeightError, resolve_weights
 from .base import BaseTool, ToolUnavailable, make_percept
 from .stereo_3d import (
     ERR_INVALID_CALIBRATION,
+    ERR_INVALID_OPTIONS,
+    _depth_sigma,
     _disparity_points,
     _error_percept,
+    _median_sigma,
+    _numeric_option,
     _rectify,
     _remap_pair,
     _sgbm_disparity,
+    _sgbm_options,
+    _sgbm_search_range,
     _StereoInputError,
     _validate_calibration,
 )
@@ -89,14 +95,11 @@ def _pair_points(
     """
     if image_a.shape[:2] != image_b.shape[:2]:
         raise _StereoInputError(ERR_INVALID_CALIBRATION, "stereo image sizes must agree")
+    num_disparities = _sgbm_search_range(num_disparities, block_size, image_a.shape[:2])
     K_rect, _R_a, info = _rectify(cal_a, cal_b, image_a.shape[:2])
     rect_a, rect_b, _ = _remap_pair(image_a, image_b, info)
     focal = info["focal_rect_px"]
     baseline = info["baseline_m"]
-
-    # A search range cannot exceed the image width (OpenCV asserts at the boundary).
-    width_limit = 16 * (int(image_a.shape[1]) // 16) - 16
-    num_disparities = max(16, min((num_disparities // 16) * 16, width_limit))
 
     disparity, valid = _sgbm_disparity(
         rect_a, rect_b, num_disparities=num_disparities, block_size=block_size
@@ -106,7 +109,7 @@ def _pair_points(
     if dist.size == 0 or valid_fraction < min_valid_fraction:
         return None
 
-    sigma = dist * dist / (focal * baseline) * sigma_d
+    sigma = _depth_sigma(dist, focal, baseline, sigma_d)
     return {
         "points": world,
         "sigma": sigma,
@@ -123,9 +126,9 @@ class Triview3DTool(BaseTool):
 
     * ``triview_method`` -- ``"pairs"`` (default) or ``"mvs"``.
     * ``stereo_num_disparities`` / ``stereo_block_size`` -- forwarded to the matcher.
-    * ``stereo_sigma_d_px`` -- assumed disparity noise, default 1.0.
-    * ``min_valid_fraction`` -- per-pair gate; a pair below it does not contribute.
-    * ``triview_max_pairs`` -- use only the best N pairs (by valid fraction). Default 3, i.e. all.
+    * ``stereo_sigma_d_px`` -- finite, strictly positive assumed disparity noise, default 1.0.
+    * ``min_valid_fraction`` -- finite per-pair gate in [0,1]; a pair below it does not contribute.
+    * ``triview_max_pairs`` -- integer 1..3; use the best N pairs by valid fraction (default 3).
     """
 
     name = TOOL_NAME
@@ -255,13 +258,15 @@ class Triview3DTool(BaseTool):
         except ImportError as exc:
             raise ToolUnavailable("triview pairs requires the stereo extra (OpenCV)") from exc
 
-        num_disparities = int(context.get("stereo_num_disparities", 640))
-        block_size = int(context.get("stereo_block_size", 5))
-        if block_size % 2 == 0:
-            block_size += 1
-        sigma_d = float(context.get("stereo_sigma_d_px", 1.0))
-        min_valid = float(context.get("min_valid_fraction", 0.01))
-        max_pairs = int(context.get("triview_max_pairs", 3))
+        try:
+            num_disparities, block_size = _sgbm_options(context)
+            sigma_d = _numeric_option(context, "stereo_sigma_d_px", 1.0, positive=True)
+            min_valid = _numeric_option(context, "min_valid_fraction", 0.01, minimum=0, maximum=1)
+            max_pairs = _numeric_option(context, "triview_max_pairs", 3, integer=True, minimum=1, maximum=3)
+            for image in ctx.images.values():
+                _sgbm_search_range(num_disparities, block_size, image.shape[:2])
+        except _StereoInputError as exc:
+            return _error_percept(self, ctx, started, exc.code, str(exc))
 
         names = sorted(calibrated)
         results: list[tuple[str, str, dict[str, Any]]] = []
@@ -279,6 +284,8 @@ class Triview3DTool(BaseTool):
                     min_valid_fraction=min_valid,
                 )
             except _StereoInputError as exc:
+                if exc.code == ERR_INVALID_OPTIONS:
+                    return _error_percept(self, ctx, started, exc.code, str(exc))
                 pair_failures.append({"pair": f"{a}-{b}", "code": exc.code, "message": str(exc)})
                 self._log(ctx, f"{a}-{b}: {exc.code}: {exc}", level="warning")
                 continue
@@ -315,19 +322,22 @@ class Triview3DTool(BaseTool):
             return []
 
         # Inverse-variance weighting: a 0.5 mm point and a 6 mm point must not count equally.
-        weights = 1.0 / np.maximum(sigma, 1e-9) ** 2
+        safe_sigma = np.maximum(sigma, 1e-9)
+        # A common scale cancels on normalization and keeps squared weights in [0, 1].
+        weights = (safe_sigma.min() / safe_sigma) ** 2
         weights /= weights.sum()
         weighted_centroid = (points * weights[:, None]).sum(axis=0)
 
         bbox_min, bbox_max = geo.percentile_bbox3d(points)
         top_z = float(geo.top_z_from_points(points))
         yaw = float(geo.yaw_from_points(points[:, :2]))
-        median_sigma = float(np.median(sigma))
+        median_sigma = _median_sigma(sigma)
 
         # Report how much of the three-view claim survives: a result built on one pair is a
         # two-view answer wearing a three-view label, and the caller should be able to tell.
         pair_names = [f"{a}-{b}" for a, b, _ in results]
         degrade = len(results) < len(list(combinations(names, 2)))
+        views_used = len({n for a, b, _ in results for n in (a, b)})
 
         geometry = Geometry(
             frame="world",
@@ -337,7 +347,7 @@ class Triview3DTool(BaseTool):
             top_z=top_z,
             yaw_rad=yaw,
             uncertainty_m=median_sigma,
-            views_used=len({n for a, b, _ in results for n in (a, b)}),
+            views_used=views_used,
             lateral_uncertainty_m=None,
             height_uncertainty_m=None,
             view_disagreement_m=None,
@@ -361,7 +371,7 @@ class Triview3DTool(BaseTool):
             "pair_failures": pair_failures,
             "pairs_used": len(results),
             "pairs": pair_names,
-            "degraded_to_two_view": degrade,
+            "degraded_to_two_view": views_used < 3,
             "points": int(len(points)),
             "median_sigma_z_m": median_sigma,
             "sigma_d_px": sigma_d,
@@ -372,7 +382,7 @@ class Triview3DTool(BaseTool):
                     "focal_rect_px": info["focal"],
                     "valid_fraction": info["valid_fraction"],
                     "points": int(len(info["points"])),
-                    "median_sigma_z_m": float(np.median(info["sigma"])),
+                    "median_sigma_z_m": _median_sigma(info["sigma"]),
                 }
                 for a, b, info in results
             ],

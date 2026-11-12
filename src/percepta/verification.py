@@ -22,8 +22,9 @@ Checks (spec §10)
 
 ``lifted``
     ``after.geometry.centroid.z - before.geometry.centroid.z >= required_lift_m``
-    (default 0.10 m). Missing geometry or mismatched geometry frames -> ``False`` with
-    ``details["geometry_available"] == 0.0`` / ``details["frame_mismatch"] == 1.0``.
+    (default 0.10 m). Requires both geometries in the world frame; camera +Z is forward,
+    and pixel coordinates are not metres. Missing geometry or unsupported frames produce
+    ``False`` and a numeric availability/frame marker in ``details``.
 
 ``stable``
     Mask IoU between ``after`` and ``options["stable_with"]`` (a :class:`Percept`, an
@@ -268,6 +269,8 @@ def compare(
         if before_z[1] != after_z[1]:
             # z in different frames is not comparable; refuse rather than guess.
             details["frame_mismatch"] = 1.0
+        elif before_z[1] != "world":
+            details["world_frame_required"] = 1.0
         else:
             lift_m = after_z[0] - before_z[0]
             details["lift_m"] = float(lift_m)

@@ -289,7 +289,8 @@ def _cmd_perceive(args: argparse.Namespace) -> int:
         print(response.model_dump_json(indent=2))
     else:
         print(_format_response(response))
-    return 0
+    results = response.percepts + ([response.fused] if response.fused is not None else [])
+    return int(any(percept.status in {"unavailable", "invalid_request", "timeout"} for percept in results))
 
 
 def _cmd_tools_list(args: argparse.Namespace) -> int:

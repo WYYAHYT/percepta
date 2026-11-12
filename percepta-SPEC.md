@@ -1,4 +1,4 @@
-# percepta — 功能规格与开发说明书（v0.3.0-doc.2，2026-11-12）
+# percepta — 功能规格与开发说明书（v0.3.0-doc.3，2026-11-12）
 
 > 本文档是给**实现者（人或 Agent）**看的规格书，不是用户手册。目标是把"一套可插拔的机器人感知层"定义到**接口无歧义、验收可自动判定**的程度。实现时不要自行发明字段、端点或语义；确需变更，先改本文档并升版本。
 
@@ -11,6 +11,10 @@
 > 原始 M0–M5 已完成。SAM3 及四个双目／三目模型均已部署，后四者属于 `Unreleased`；
 > 后来的扩展方案包含更多设计任务，不代表当前全部已实现。当前调用方式见 `README.md`，
 > 部署证据与限制见 `docs/model-isolation.md`，决策沿革见 `docs/decisions.md`。
+>
+> **后续修复（同日，基线 `a761656`）**：D40–D43 关闭全盘审计的20组问题；字段与线协议版本
+> 不变，收紧非法标定、数值参数与协议帧校验。Options 是全局默认，Prompt 显式值优先；
+> 原问题、修改前内容、用户选择与回归记录见 `docs/documentation-changes.md`。
 
 ---
 
@@ -184,8 +188,8 @@ class PerceiveOptions(BaseModel):
     tools: list[str] | None = None   # None = 默认 pipeline
     fuse: bool = True                # 无显式 geometry 阶段时是否补充调用 fusion.fuse，见 §5.3
     masks: MaskEncoding = "rle"
-    min_score: float = 0.2
-    top_k: int = 1
+    min_score: float = Field(default=0.2, ge=0.0, le=1.0)
+    top_k: int = Field(default=1, ge=1)
     timeout_ms: int = 120_000
     cache: bool = True
 
@@ -204,6 +208,10 @@ class PerceiveResponse(BaseModel):
     timings_ms: dict[str, float] = {}
     warnings: list[str] = []
 ```
+
+`PerceiveRequest` 在验证时复制并合并有效 Prompt：只有未显式提供的 `min_score` / `top_k`
+才继承 Options。Prompt 显式 `0.2` / `1` 也优先，不根据“值碰巧等于默认”来猜。原 Prompt
+对象不被修改；SDK 序列化前已完成合并，所以 HTTP 与本地调用及缓存使用相同有效值（D43）。
 
 ### 3.6 JSON 示例（单相机、text 提示、RLE）
 
@@ -227,7 +235,7 @@ class PerceiveResponse(BaseModel):
 1. **像素坐标**：原点左上；`u` 向右（列），`v` 向下（行）；`point=[u,v]`；`box=[x0,y0,x1,y1]` 浮点像素，`x1/y1` 为开区间外沿。
 2. **相机坐标**：OpenCV 约定（x 右、y 下、z 向前）。
 3. **世界坐标**：右手系，米；由 `T_world_cam` 唯一确定（**camera→world**，即 `p_world = T_world_cam @ p_cam_h`）。
-4. **内参**：`K` 3x3，像素单位；输入不含镜头畸变参数，假定已去畸变。双目工具仍须按 K/T 做极线校正。
+4. **内参**：`K` 3x3，像素单位；支持正焦距、零 skew、底行 `[0,0,1]` 的 pinhole 模型；输入不含镜头畸变参数，假定已去畸变。双目工具仍须按 K/T 做极线校正。`T_world_cam` 必须是有限 proper rigid 变换，R 正交且 det=+1，底行 `[0,0,0,1]`；不能将缩放、反射或零矩阵当作标定（D41）。
 5. **深度**：`DepthRef` 为 float32 米，与 RGB 同分辨率；可选。`multi_view_3d` 无深度时使用轮廓/平面假设；`stereo_3d` / `triview_3d` 可从标定 RGB 估计深度。
 6. **尺寸/分辨率校验**：图像 `(H,W)` 必须与 `Calibration.height/width` 一致，否则 `invalid_request`。
 7. **mask 尺寸**：与原图同 `(H,W)`；`area_px = sum(mask)`；`centroid_uv` 为 mask 像素均值。
@@ -283,9 +291,11 @@ class PerceptionTool(abc.ABC):
 - 默认 pipeline：`[<默认 segmenter>, multi_view_3d]`（`multi_view_3d` 是内置 geometry 工具）。
 - 工具顺序即数据流：前一个工具的 `Percept` 作为后一个的输入（通过 `ctx.extras["upstream"]` 传递）。
 - 每请求每工具调用一次，带全部相机；工具内部遍历或联合处理视角，推理由 per-tool 锁串行化。
+- SAM3 每次请求为每相机准备一次图像，不以 ndarray 地址跨请求复用；每个 Prompt 重置提示状态但保留本图特征。值相同的 Prompt 可复用推理，输出按原出现次数与顺序恢复独立对象（D40/D42）。
 - `kind="geometry"` 阶段中的最后一条 `status="ok"` Percept 直接成为 `response.fused`，该条不再进入 `percepts`，也不二次调用 `fusion.fuse()`。
 - 配置解析会移除禁用工具，并把 `multi_view_3d` 移到末尾；其它工具保留请求顺序。多个 geometry 阶段按此解析顺序执行，**后一个成功结果覆盖前一个**；后一个失败时保留已有成功结果，失败 Percept 仍可见。这不是自动质量选择或模型回退策略。
 - `options.fuse=False` 关闭补充融合，但 pipeline 不会跳过显式 geometry 工具：`multi_view_3d` 内部遵守此选项返回空，`stereo_3d` / `triview_3d` 仍可填写 `fused`。要统一关闭某工具须从工具列表移除。
+- 已选择 geometry 的加载失败也按其声明 kind 计入，不触发未选择的通用融合；失败 Percept 保持可见（D40）。
 
 ### 5.4 当前工具与模型
 
@@ -413,7 +423,7 @@ class VerificationResult(BaseModel):
 `percepta.verification.compare(before: Percept, after: Percept, action: dict, options) -> VerificationResult`：
 
 - `followed`：after 的 mask 质心位移与 `action["ee_delta_px"]` 方向/幅度一致（阈值可配）；
-- `lifted`：`after.geometry.centroid.z - before.geometry.centroid.z >= required_lift_m`（默认 0.10）；
+- `lifted`：两侧均为 world frame 时，`after.geometry.centroid.z - before.geometry.centroid.z >= required_lift_m`（默认 0.10）；相同 camera/pixel frame 也不能当作米制竖直抬升，缺变换时返回不可验证；
 - `stable`：连续两次 after 的 mask IoU ≥ 阈值（可选）；
 - `visible`：after 的 `status == ok` 且 mask 面积 ≥ `min_area_px`。
 - 任一必要检查失败 → `ok=false`；不得把 `not_found` 当作通过。
@@ -463,6 +473,8 @@ warmup:
 ### 11.2 并发
 
 - 每工具一把进程内锁（模型推理串行）；服务层 `BoundedSemaphore` 控制排队；超时/满 → 503/504。
+- 首次加载在同一 per-tool 锁内执行；失败构造/加载实例会尽力关闭，不发布半成品。HTTP504/取消不释放仍在计算的任务占用，任务实际结束才释放准入位和 inflight；shutdown 先停止准入并等待任务及预热，再关闭工具。
+- 通用 SAM3 子进程的 `timeout_s` 分别约束启动握手及每次完整写入/读取 RPC；首次请求可能经历两段预算。超时、EOF、坏协议帧是终止故障并回收 worker，不静默重启或伪装为 not_found。
 - 多 GPU：一个进程绑一张卡（`CUDA_VISIBLE_DEVICES`）；多实例多端口。
 - 子进程模型可各自设置 `cuda_visible_devices`；空字符串继承进程环境，不会自动选择空闲显卡。当前没有自动多 worker 调度或崩溃后重启。
 
@@ -477,6 +489,7 @@ warmup:
 
 - key：`sha256(image) + prompt + tool + options(相关子集)`；LRU + TTL；命中时 `provenance.cache_hit=true`（不改变结果内容）。
 - options 只包含 `masks` / `min_score` / `top_k`；不包含 context、标定、模型配置。缓存仅用于无上游结果的阶段。依赖这些未入 key 数据的几何工具应关闭缓存，当前神经双目/三目配置均如此。
+- pipeline 在缓存读写边界深复制结果；不改变通用 `PerceptCache.get()` 的 identity 契约。SDK 对返回对象的修改不影响后续请求（D42）。
 
 ---
 
@@ -631,6 +644,7 @@ percepta/
 | v0.3.0 | 2026-11-09 | D35 已落地：采样柱体轮廓约束、完整 IoU 曲线峰值搜索、可选分轴不确定度与 method；本行补记对应已发布版本，未重写此前历史 |
 | v0.3.0-doc.1 | 2026-11-12 | 按 `534066a` 对齐当前字段、pipeline、模型隔离、双目/三目能力与 SAM3 API；D36–D38 部署及修复仍为 Unreleased。原文、原因和代码审计限制见 `docs/documentation-changes.md`；本次不升级包或 schema |
 | v0.3.0-doc.2 | 2026-11-12 | D39 修复 DOC-20261112-01/02：hang polygon 转网格像素、横向估计距离减完整光心；补平移不变性回归并更新当前状态。此前未修记录保留，未升级包或 schema |
+| v0.3.0-doc.3 | 2026-11-12 | D40–D43 按 `a761656` 的20组审计问题修复请求状态、加载/超时生命周期、几何边界、缓存/SDK/错误元数据；按用户选择明确 Options 默认与 Prompt 显式优先，保留历史审计与红绿记录 |
 
 ---
 
@@ -692,6 +706,10 @@ D23/D27 的模型依赖边界已由 D33 替代。现行描述以 §3/§5/§9/§1
 | D37 | FFS、MVSAnywhere、DA3 独立运行时；严格资产加载、显式尺度与无静默模型替换 |
 | D38 | DA3 尺寸校验及 float64 位姿重基准、wheel 资产清单、worker 故障健康状态 |
 | D39 | hang polygon 先从世界 XY 转网格像素；横向不确定度距离使用完整光心，平移世界坐标不改变相对几何结果 |
+| D40 | 图像/提示状态按请求隔离；首次加载串行，失败清理；worker RPC有实际期限，HTTP占用与真实任务寿命一致，加载失败不擅自融合 |
+| D41 | schema与直接几何共用物理标定校验；数值/尺寸先验证，世界frame才可验证抬升，三目退化标记按实际相机数 |
+| D42 | 缓存结果隔离、重复提示线性输出、SDK期限/资源清理、CLI失败退出码及模型hash/健康元数据对齐 |
+| D43 | 用户确认 Options 作为默认，Prompt 显式值优先；请求验证统一合并，SDK/HTTP有效值与缓存一致 |
 
 ---
 

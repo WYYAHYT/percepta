@@ -23,8 +23,9 @@ Hard rules enforced here:
 * no ``Calibration`` -> **never** a ``Geometry`` (spec §9: 不得用像素猜米);
 * every returned geometry has ``frame="world"`` and a non-null ``uncertainty_m``;
 * ``views_used`` counts only views that actually contributed;
-* ``fuse`` never raises on empty/partial input — it returns ``None`` and lets the pipeline
-  add ``geometry_unavailable``.
+* empty/partial mask input is tolerated; without usable geometry ``fuse`` returns ``None``
+  and lets the pipeline add ``geometry_unavailable``;
+* malformed camera matrices raise ``ValueError``; request schemas reject them before inference.
 
 The prism-search tunables of D4 (``prism_max_height_m``, ``prism_step_m``,
 ``prism_iou_threshold``) are read from ``context`` with the D4 defaults, because
@@ -45,6 +46,7 @@ import numpy as np
 
 from . import geometry as geo
 from . import hull
+from ._calibration import pinhole_intrinsics, rigid_transform
 from .masks import decode_depth, to_array
 from .schema import Geometry, PerceiveOptions, Percept
 from .tools.base import build_provenance, make_percept
@@ -118,10 +120,11 @@ class _View:
 def _collect_views(
     percepts: list[Percept] | None, calibration: dict[str, Any]
 ) -> list[_View]:
-    """Pick the best-scoring mask per calibrated camera; skip everything unusable.
+    """Pick the best-scoring usable mask per camera; reject malformed camera matrices.
 
     Tolerant by contract: a percept without a mask, a camera without calibration, an
     undecodable RLE payload or a size mismatch is silently skipped rather than raising.
+    A supplied nonphysical calibration raises ``ValueError`` before it can produce geometry.
     """
     calibration = calibration or {}
     best: dict[str, _View] = {}
@@ -132,6 +135,8 @@ def _collect_views(
         if camera is None or camera not in calibration:
             continue
         calib = calibration[camera]
+        K = pinhole_intrinsics(calib.K)
+        T = rigid_transform(calib.T_world_cam)
         expected = (int(calib.height), int(calib.width))
         depth: np.ndarray | None = None
         if calib.depth is not None:
@@ -156,8 +161,8 @@ def _collect_views(
             view = _View(
                 camera=camera,
                 mask=mask,
-                K=np.asarray(calib.K, dtype=np.float64),
-                T=np.asarray(calib.T_world_cam, dtype=np.float64),
+                K=K,
+                T=T,
                 score=float(observation.score),
                 depth=depth,
                 calibration_id=calib.id,
@@ -463,9 +468,7 @@ def _fuse_prism(
     # nothing to compare, and the answer is whatever that single guess scored. A caller passing an
     # absurd ``prism_step_m`` (a bug, or a deliberate "just give me something") would otherwise
     # silently get a one-sample search; floor it at a resolution that can still find a peak.
-    steps = max(MIN_PRISM_STEPS, int(round(max_height / step)))
-    if steps > MAX_PRISM_HYPOTHESES:
-        steps = MAX_PRISM_HYPOTHESES
+    steps = max(MIN_PRISM_STEPS, int(round(min(max_height / step, MAX_PRISM_HYPOTHESES))))
     step = max_height / float(steps)
     heights = [step * float(index) for index in range(1, steps + 1)]
 
@@ -859,15 +862,24 @@ def fuse(
 ) -> Percept | None:
     """Fuse upstream per-camera percepts into one world-frame ``Geometry``.
 
-    ``percepts`` are the pipeline's earlier masks (spec §5.3, ``ctx.extras["upstream"]``);
-    ``calibration`` maps camera -> :class:`~percepta.schema.Calibration`; ``context`` is the
-    request context (``table_plane``/``table_z`` plus the D4 prism tunables);
-    ``options.fuse=False`` disables geometry.
+    Args:
+        percepts: Earlier per-camera masks (spec §5.3, ``ctx.extras["upstream"]``).
+        calibration: Camera names mapped to pixel intrinsics and rigid camera-to-world poses
+            in metres, with ``p_world = T_world_cam @ p_cam_h``.
+        context: Request context, including ``table_plane``/``table_z`` and prism tunables.
+        options: Request options; ``fuse=False`` disables geometry.
 
-    Returns a ``Percept`` with ``status="ok"``, ``geometry.frame="world"``, a non-null
-    ``uncertainty_m``, and the method/warnings in ``extras``. Returns ``None`` when no
-    geometry can be produced — in particular whenever no calibration is supplied (spec §9:
-    a calibrated camera is the only licence to convert pixels to metres).
+    Returns:
+        An ok ``Percept`` with world geometry, finite uncertainty and method/warnings in
+        ``extras``, or ``None`` when no geometry is possible, including absent calibration.
+
+    Raises:
+        ValueError: A used camera has unsupported intrinsics or a nonrigid camera-to-world pose,
+            including a calibration mutated after schema validation.
+
+    Example:
+        >>> fuse([], {}, {}) is None
+        True
     """
     started = time.perf_counter()
     if options is not None and getattr(options, "fuse", True) is False:

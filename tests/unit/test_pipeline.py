@@ -629,6 +629,33 @@ def test_geometry_stage_failure_stays_in_percepts(monkeypatch: pytest.MonkeyPatc
     assert "tool_unavailable" in response.warnings
 
 
+def test_geometry_load_failure_keeps_declared_kind_and_never_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    from percepta.tools.fake import FakeTool
+
+    class BrokenGeometry(GeometryStageTool):
+        def load(self, config):
+            raise ToolUnavailable("geometry checkpoint missing")
+
+    _fail_fusion(monkeypatch)
+    registry = ToolRegistry()
+    registry.register("fake", FakeTool)
+    registry.register("geom", BrokenGeometry)
+    runner = PipelineRunner(registry, config_for(["fake", "geom"]))
+    try:
+        response = runner.perceive(request_for([TEXT], tools=["fake", "geom"], fuse=True))
+    finally:
+        runner.close()
+    assert response.fused is None
+    assert response.percepts[0].observations[0].mask is not None
+    failed = [percept for percept in response.percepts if percept.provenance.tool == "geom"]
+    assert len(failed) == 1
+    assert failed[0].status == "unavailable"
+    assert failed[0].provenance.kind == "geometry"
+    assert "tool_unavailable" in response.warnings
+    assert "geometry_unavailable" in response.warnings
+    assert "fuse" not in response.timings_ms
+
+
 def test_two_cameras_with_a_geometry_stage_keep_one_percept_per_camera(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -683,6 +710,51 @@ def test_cache_key_distinguishes_mask_encoding() -> None:
         runner.close()
     assert len(tool.calls) == 2, "options.masks changes the payload, so the key must change"
     assert len(cache.keys) == 2
+
+
+@pytest.mark.parametrize("mutate_hit", [False, True])
+def test_cached_results_are_isolated_from_returned_nested_mutation(mutate_hit: bool) -> None:
+    runner = make_runner(config_for(["fake"]), cache=DictCache())
+    request = request_for([TEXT], tools=["fake"])
+    try:
+        response = runner.perceive(request)
+        if mutate_hit:
+            response = runner.perceive(request)
+        percept = response.percepts[0]
+        expected = percept.model_dump(exclude={"provenance": {"cache_hit"}})
+        percept.observations[0].area_px = 9999
+        percept.observations[0].mask.counts[0] = 9999
+        percept.observations[0].attributes["changed"] = True
+        percept.extras["changed"] = {"nested": [1]}
+        fresh = runner.perceive(request).percepts[0]
+    finally:
+        runner.close()
+    assert fresh.model_dump(exclude={"provenance": {"cache_hit"}}) == expected
+    assert fresh.provenance.cache_hit is True
+
+
+@pytest.mark.parametrize("cache_state", ["disabled", "cold", "hot", "mixed"])
+def test_repeated_prompts_preserve_occurrences_without_multiplying_results(cache_state: str) -> None:
+    tool = RecordingTool()
+    cache = None if cache_state == "disabled" else DictCache()
+    runner = make_runner(config_for([tool.name]), tool, cache=cache)
+    other = Prompt(type="text", text="blue block")
+    images = {CAM: synth.red_square_scene(), "cam_left": synth.red_square_scene()}
+    prompts = [TEXT, other, TEXT]
+    try:
+        if cache_state in {"hot", "mixed"}:
+            warm = prompts if cache_state == "hot" else [TEXT]
+            runner.perceive(request_for(warm, images=images, tools=[tool.name]))
+        response = runner.perceive(request_for(prompts, images=images, tools=[tool.name]))
+    finally:
+        runner.close()
+    assert [(p.provenance.prompt.text, p.camera) for p in response.percepts] == [
+        (prompt.text, camera) for prompt in prompts for camera in sorted(images)
+    ]
+    assert len({p.model_dump_json() for p in response.percepts}) >= 4
+    assert all(len(call) == len({prompt.model_dump_json() for prompt in call}) for call in tool.calls)
+    response.percepts[0].observations[0].area_px = 123
+    assert response.percepts[4].observations[0].area_px != 123
 
 
 def test_broken_cache_degrades_to_no_cache() -> None:
